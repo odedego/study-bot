@@ -1,0 +1,175 @@
+{
+"version": 1,
+"updated": "2026-10-15T03:52+03:00",
+"pins": [
+{
+"key": "review:econ:2026-10-20:שיעור:1",
+"start": "2026-10-22T09:00"
+}
+],
+"sessions": [
+{
+"key": "review:math:2026-10-19:שיעור:1",
+"status": "planned",
+"kind": "review",
+"course": "math",
+"courses": [
+"math"
+],
+"start": "2026-10-19T20:00+03:00",
+"end": "2026-10-19T20:50+03:00",
+"lesson_day": "2026-10-19",
+"eventId": "q0772p2rt12bfq8s8ab3onbs6g"
+},
+{
+"key": "review:math:2026-10-19:שיעור:2",
+"status": "planned",
+"kind": "review",
+"course": "math",
+"courses": [
+"math"
+],
+"start": "2026-10-20T12:15+03:00",
+"end": "2026-10-20T13:05+03:00",
+"lesson_day": "2026-10-19",
+"eventId": "vjou5q5h0p4nij3ktkjvk5snic"
+},
+{
+"key": "review:math:2026-10-19:שיעור:3",
+"status": "planned",
+"kind": "review",
+"course": "math",
+"courses": [
+"math"
+],
+"start": "2026-10-20T13:20+03:00",
+"end": "2026-10-20T14:10+03:00",
+"lesson_day": "2026-10-19",
+"eventId": "3pipi95r4ugeg94rkn7glp3o1s"
+},
+{
+"key": "review:intro:2026-10-21:שיעור:1",
+"status": "planned",
+"kind": "review",
+"course": "intro",
+"courses": [
+"intro"
+],
+"start": "2026-10-21T20:00+03:00",
+"end": "2026-10-21T20:50+03:00",
+"lesson_day": "2026-10-21",
+"eventId": "5hjkeet6iidc4r8b0gso9b7pco"
+},
+{
+"key": "review:econ:2026-10-20:שיעור:1",
+"status": "planned",
+"kind": "review",
+"course": "econ",
+"courses": [
+"econ"
+],
+"start": "2026-10-22T09:00+03:00",
+"end": "2026-10-22T09:50+03:00",
+"lesson_day": "2026-10-20",
+"eventId": "mr5fqdem6kkmvgpnn1llopelr4"
+},
+{
+"key": "review:intro:2026-10-21:שיעור:2",
+"status": "planned",
+"kind": "review",
+"course": "intro",
+"courses": [
+"intro"
+],
+"start": "2026-10-22T10:05+03:00",
+"end": "2026-10-22T10:55+03:00",
+"lesson_day": "2026-10-21",
+"eventId": "epe78nuue3aeu257vhffogud5k"
+},
+{
+"key": "review:stats:2026-10-19:שיעור:1",
+"status": "planned",
+"kind": "review",
+"course": "stats",
+"courses": [
+"stats"
+],
+"start": "2026-10-23T09:00+03:00",
+"end": "2026-10-23T09:50+03:00",
+"lesson_day": "2026-10-19",
+"eventId": "q0d7il04o3egt0pioeimlc2u38"
+},
+{
+"key": "review:econ:2026-10-20:שיעור:2",
+"status": "planned",
+"kind": "review",
+"course": "econ",
+"courses": [
+"econ"
+],
+"start": "2026-10-23T10:05+03:00",
+"end": "2026-10-23T10:55+03:00",
+"lesson_day": "2026-10-20",
+"eventId": "toqpg90i0hj81u2o4vdf90omm0"
+},
+{
+"key": "review:excel:2026-10-22:שיעור:1",
+"status": "planned",
+"kind": "review",
+"course": "excel",
+"courses": [
+"excel"
+],
+"start": "2026-10-23T11:15+03:00",
+"end": "2026-10-23T12:05+03:00",
+"lesson_day": "2026-10-22",
+"eventId": "b6lcaan5k1ovbv0vhsr8onb5g0"
+},
+{
+"key": "review:law:2026-10-19:שיעור:1",
+"status": "planned",
+"kind": "review",
+"course": "law",
+"courses": [
+"law"
+],
+"start": "2026-10-23T12:15+03:00",
+"end": "2026-10-23T13:05+03:00",
+"lesson_day": "2026-10-19",
+"eventId": "a17ipvo0l3n9jfrlhcrppj4cl0"
+}
+],
+"recaps": [],
+"assignments": [],
+"course_kind": {
+"math": "cumulative",
+"intro": "cumulative",
+"econ": "cumulative",
+"stats": "cumulative",
+"excel": "cumulative",
+"law": "cumulative",
+"mgmt": "cumulative"
+},
+"pending_questions": [
+{
+"id": "q1",
+"text": "ניהול בארגונים: מבחן או עבודה? (יתברר בשבוע הראשון)",
+"asked": "2026-10-15T02:24+03:00"
+}
+],
+"runs": [],
+"notified": {
+"e41432": "2026-10-15",
+"3941da": "2026-10-15",
+"9ee651": "2026-10-15"
+},
+"acked": [
+"3941da",
+"9ee651",
+"e41432"
+],
+"archive": {},
+"archived_keys": [
+"review:mgmt:2026-10-21:שיעור:1"
+]
+}

@@ -1,0 +1,53 @@
+name: study-bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"      # tick: הודעות + משימות שהגיע זמנן (שעון ישראל מחושב בקוד)
+    - cron: "17 3 * * 1"       # keepalive שבועי: GitHub מכבה cron ב-repo ציבורי אחרי 60 יום בלי פעילות
+  workflow_dispatch:
+    inputs:
+      cmd:
+        description: "tick או check"
+        default: "check"
+
+concurrency:
+  group: study-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  run:
+    if: github.event.schedule != '17 3 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: run
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
+          REVIEWS_CAL_ID: ${{ secrets.REVIEWS_CAL_ID }}
+          PERSONAL_CAL_ID: ${{ secrets.PERSONAL_CAL_ID }}
+          FEED_URL: ${{ secrets.FEED_URL }}
+          UPSTASH_URL: ${{ secrets.UPSTASH_URL }}
+          UPSTASH_TOKEN: ${{ secrets.UPSTASH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL: claude-sonnet-5-5
+        run: python -m bot.main ${{ github.event.inputs.cmd || 'tick' }}
+
+  keepalive:
+    if: github.event.schedule == '17 3 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/bot.yml/enable"
