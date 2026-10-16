@@ -629,6 +629,7 @@ class Bot:
     def handle_updates(self):
         b = self.st["bot"]
         ups = self.tg.get_updates(b["offset"])
+        self.log.append(f"updates: {len(ups)} (offset {b['offset']})")
         for i, u in enumerate(ups):
             b["offset"] = u["update_id"] + 1
             if i and i % 5 == 0:

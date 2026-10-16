@@ -56,6 +56,7 @@ def check():
         except Exception as e:  # noqa: BLE001
             res.append(f"❌ {name}: {str(e)[:160]}")
 
+    step("טלגרם", lambda: "@" + tg._call("getMe")["username"])
     step("Google (חשבון שירות)", lambda: cal.email)
     step("יומן חזרות", lambda: f"{len(cal.list(cfg['REVIEWS_CAL'], now.isoformat(), (now + timedelta(days=14)).isoformat()))} אירועים בשבועיים הקרובים")
     step("יומן אישי", lambda: f"{len(cal.list(cfg['PERSONAL_CAL'], now.isoformat(), (now + timedelta(days=14)).isoformat()))} אירועים" if cfg["PERSONAL_CAL"] else "לא הוגדר")
