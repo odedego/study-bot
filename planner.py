@@ -307,8 +307,11 @@ class Session:
     end: datetime
     lesson_day: date | None = None
     note: str = ""
+    label: str = ""          # כותרת לסשנים שאינם חזרה על שיעור (חיזוק, מטלה, מרתון)
 
     def title(self) -> str:
+        if self.kind in LABEL_KINDS:
+            return self.label or f"📚 {COURSES[self.course]['name']}"
         if self.kind == "weekly":
             names = " + ".join(COURSES[c]["name"] for c in self.courses)
             return f"🗓️ חזרה שבועית · {names}"
@@ -323,11 +326,14 @@ class Session:
             "title": self.title(),
             "description": self.description(),
             "note": self.note,
+            "label": self.label,
         }
 
     def description(self) -> str:
         lines = []
-        if self.kind == "weekly":
+        if self.kind in LABEL_KINDS:
+            pass
+        elif self.kind == "weekly":
             lines.append("חזרה מקיפה על החומר של השבוע שעבר, ומטלות פתוחות.")
         else:
             lines.append("כ-30 דקות חזרה על השיעור, והשאר למטלות ותרגול של הקורס.")
@@ -335,6 +341,10 @@ class Session:
             lines.append(self.note)
         lines.append(f"מזהה: {self.key}")
         return "\n".join(lines)
+
+
+# סשנים שהבוט מוסיף מעבר לחזרות הרגילות: לא נספרים בתקרה השבועית ולא משובצים מחדש אוטומטית
+LABEL_KINDS = ("extra", "assign", "marathon")
 
 
 def busy_blocks(day: date, uni: Uni, personal: list[Ev]) -> list[tuple[datetime, datetime, str]]:
@@ -427,7 +437,19 @@ class Demand:
         return (COURSES[self.course]["tier"], self.lesson.end, COURSE_ORDER.index(self.course), self.unit)
 
 
-def demands_for_week(ws: date, uni: Uni) -> list[Demand]:
+def marathon_on(st: dict | None, d: date) -> bool:
+    """במרתון אין חזרה שבועית ביום ראשון: סשני המרתון מחליפים אותה."""
+    m = (st or {}).get("marathon") or {}
+    return bool(m.get("start")) and m.get("status") in ("scheduled", "active") and d.isoformat() >= m["start"]
+
+
+def target_of(c: str, st: dict | None) -> int:
+    """יעד סשנים שבועי לקורס. אחרי הכיול אפשר לשנות לכל קורס (st["weekly_targets"])."""
+    v = (st or {}).get("weekly_targets", {}).get(c)
+    return COURSES[c]["weekly"] if v is None else int(v)
+
+
+def demands_for_week(ws: date, uni: Uni, st: dict | None = None) -> list[Demand]:
     we = ws + timedelta(days=7)
     week_lessons = [l for l in uni.lessons if ws <= l.day < we]
     by_course: dict[str, list[Lesson]] = defaultdict(list)
@@ -436,7 +458,9 @@ def demands_for_week(ws: date, uni: Uni) -> list[Demand]:
     out = []
     for c, ls in by_course.items():
         ls.sort(key=lambda l: l.start)
-        target, n = COURSES[c]["weekly"], len(ls)
+        target, n = target_of(c, st), len(ls)
+        if target <= 0:
+            continue
         units = [1] * n if n >= target else [target // n + (1 if i < target % n else 0) for i in range(n)]
         for l, u in zip(ls, units):
             for i in range(u):
@@ -447,7 +471,8 @@ def demands_for_week(ws: date, uni: Uni) -> list[Demand]:
 def _session_from_state(s: dict) -> Session:
     return Session(s["key"], s.get("kind", "review"), s.get("course"), s.get("courses") or [s.get("course")],
                    datetime.fromisoformat(s["start"]), datetime.fromisoformat(s["end"]),
-                   date.fromisoformat(s["lesson_day"]) if s.get("lesson_day") else None, note=s.get("note", ""))
+                   date.fromisoformat(s["lesson_day"]) if s.get("lesson_day") else None, note=s.get("note", ""),
+                   label=s.get("label", ""))
 
 
 def base_key(key: str) -> str:
@@ -482,7 +507,7 @@ def plan_week(ws: date, uni: Uni, personal: list[Ev], st: dict | None = None) ->
     sun = ws
     has_weekly = any(s.kind == "weekly" for s in sessions) or any(
         s.get("kind") == "weekly" and s["key"].startswith(f"weekly:{sun.isoformat()}") for s in st.get("sessions", []))
-    if prev_courses and not has_weekly:
+    if prev_courses and not has_weekly and not marathon_on(st, sun):
         prof = day_profile(sun, uni)
         if prof["type"] in ("free", "evening_class", "free_with_class"):
             groups = [g for g in CONFIG["weekly_groups"] if any(c in prev_courses for c in g)]
@@ -496,7 +521,7 @@ def plan_week(ws: date, uni: Uni, personal: list[Ev], st: dict | None = None) ->
             notes.append(f"אין מקום לחזרה שבועית ב-{fmt_d(sun)}: צריך להחליט איפה.")
 
     # 2) דרישות חדשות בלבד
-    demands = demands_for_week(ws, uni)
+    demands = demands_for_week(ws, uni, st)
     demand_keys = {d.key for d in demands}
     pending = [d for d in demands if d.key not in claimed]
     dur = timedelta(minutes=CONFIG["session_min"])
@@ -547,18 +572,18 @@ def plan_week(ws: date, uni: Uni, personal: list[Ev], st: dict | None = None) ->
         "sessions": [s.to_json() for s in sessions],
         "unplaced": unplaced,
         "orphans": orphans,
-        "targets": weekly_targets(ws, uni, sessions),
+        "targets": weekly_targets(ws, uni, sessions, st),
         "touchpoints": touchpoints(ws, uni),
         "notes": notes,
     }
 
 
-def weekly_targets(ws: date, uni: Uni, sessions: list[Session]) -> dict:
+def weekly_targets(ws: date, uni: Uni, sessions: list[Session], st: dict | None = None) -> dict:
     planned = Counter(s.course for s in sessions if s.kind in ("review", "rescheduled"))
     out = {}
     for c in COURSE_ORDER:
         has = any(ws <= l.day < ws + timedelta(days=7) and l.course == c for l in uni.lessons)
-        out[c] = {"name": COURSES[c]["name"], "target": COURSES[c]["weekly"] if has else 0, "planned": planned[c]}
+        out[c] = {"name": COURSES[c]["name"], "target": target_of(c, st) if has else 0, "planned": planned[c]}
     return out
 
 
@@ -767,7 +792,7 @@ def reschedule(today: date, uni: Uni, personal: list[Ev], state: dict, now: date
     """
     now = now or datetime.now(TZ)
     cutoff = at(today, time(0, 0))
-    missed = [s for s in state.get("sessions", []) if s.get("course") and (
+    missed = [s for s in state.get("sessions", []) if s.get("course") and s.get("kind", "review") in ("review", "rescheduled") and (
         s.get("status") == "missed" or (s.get("status") == "planned" and datetime.fromisoformat(s["end"]) < cutoff))]
     missed_keys = {m["key"] for m in missed}
     # מה כבר תפוס: התוכנית של השבוע הזה והבא + השלמות קיימות
@@ -953,7 +978,7 @@ def dump_state(st: dict) -> str:
 
 
 COMPACT_AFTER_DAYS = 14
-SESSION_FIELDS = ("key", "status", "kind", "course", "courses", "start", "end", "lesson_day", "eventId", "note", "moved_to")
+SESSION_FIELDS = ("key", "status", "kind", "course", "courses", "start", "end", "lesson_day", "eventId", "note", "moved_to", "label")
 
 
 def compact_state(st: dict, now: datetime):
@@ -970,6 +995,13 @@ def compact_state(st: dict, now: datetime):
                 row["done"] += 1
             elif s.get("status") in ("missed", "dropped"):
                 row["missed"] += 1
+            if s.get("kind") == "marathon" and s.get("course"):
+                # התקדמות המרתון נשמרת גם אחרי שהסשן עצמו נמחק מהמצב
+                m = st.setdefault("marathon", {})
+                if s.get("status") == "done":
+                    m.setdefault("archived_done", {})[s["course"]] = m.get("archived_done", {}).get(s["course"], 0) + 1
+                if s.get("status") != "dropped":
+                    m.setdefault("archived_total", {})[s["course"]] = m.get("archived_total", {}).get(s["course"], 0) + 1
             st.setdefault("archived_keys", []).append(base_key(s["key"]))
         else:
             keep.append({k: s[k] for k in SESSION_FIELDS if s.get(k) not in (None, "")})
@@ -1007,7 +1039,7 @@ def register_plan(st: dict, plan: dict, event_ids: dict | None = None):
             st["sessions"].append(cur)
             idx[s["key"]] = cur
         if cur.get("status") in ("planned", None):
-            cur.update({k: s[k] for k in ("kind", "course", "courses", "start", "end", "lesson_day", "title", "note")})
+            cur.update({k: s.get(k, "") if k == "label" else s[k] for k in ("kind", "course", "courses", "start", "end", "lesson_day", "title", "note", "label")})
         if s["key"] in event_ids:
             cur["eventId"] = event_ids[s["key"]]
 

@@ -143,6 +143,16 @@ class FakeCalendar:
         return self.cals[cal][eid]
 
     roles: dict = {}
+    shares: list = []
+
+    def create_calendar(self, summary):
+        cid = f"{summary}@sa"
+        self.cals.setdefault(cid, {})
+        self.calls.append(("create_calendar", summary))
+        return cid
+
+    def share(self, cal, email, role="reader"):
+        self.shares = self.shares + [(cal, email, role)]
 
     def access_role(self, cal):
         return self.roles.get(cal, "writer")
@@ -187,6 +197,14 @@ class MemStore:
     def save(self, st):
         self.blob = json.dumps(st, ensure_ascii=False)
         self.saves += 1
+
+    mail: list = []
+
+    def mail_read(self):
+        return list(self.mail)
+
+    def mail_trim(self, n):
+        self.mail = self.mail[n:]
 
 
 class FakeLLM:

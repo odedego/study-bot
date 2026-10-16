@@ -110,7 +110,7 @@ def audit(sess, lessons, personal, label):
     by_week = defaultdict(int)
     by_day = defaultdict(list)
     for s, e, title, desc in sess:
-        if "חזרה שבועית" not in title:
+        if " · חזרה על " in title or " · השלמה על " in title:   # רק החזרות הרגילות נספרות בתקרה (תוספות ומרתון לא)
             by_week[P.week_start(s.date())] += 1
         by_day[s.date()].append((s, e, title))
     check(all(n <= 11 for n in by_week.values()), f"{label}: ≤11 sessions per week {dict((k.isoformat(), v) for k, v in by_week.items())}")

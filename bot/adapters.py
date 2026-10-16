@@ -187,6 +187,15 @@ class Calendar:
                 raise
         return self._req("POST", f"{self.API}/users/me/calendarList", json={"id": cal_id}).get("accessRole", "")
 
+    def create_calendar(self, summary: str) -> str:
+        """יומן חדש בחשבון השירות (למשל "שיעורים"). מחזיר את ה-id שלו."""
+        return self._req("POST", f"{self.API}/calendars", json={"summary": summary, "timeZone": "Asia/Jerusalem"})["id"]
+
+    def share(self, cal_id: str, email: str, role: str = "reader"):
+        """משתף יומן של חשבון השירות עם עודד. Google שולח לו מייל עם כפתור הוספה."""
+        return self._req("POST", f"{self.API}/calendars/{requests.utils.quote(cal_id, safe='')}/acl",
+                         json={"role": role, "scope": {"type": "user", "value": email}})
+
     def patch(self, cal_id: str, event_id: str, body: dict) -> dict:
         return self._req("PATCH", f"{self.API}/calendars/{requests.utils.quote(cal_id)}/events/{event_id}", json=body)
 
@@ -254,6 +263,25 @@ class Upstash:
         _retry(go)
 
 
+    MAIL = "study-bot:mail"
+
+    def _cmd(self, *cmd):
+        def go():
+            r = requests.post(self.url, headers=self.h, json=list(cmd), timeout=TIMEOUT)
+            _check(r, "upstash")
+            return r.json().get("result")
+        return _retry(go)
+
+    def mail_read(self) -> list[str]:
+        """מיילים שסקריפט ה-Apps Script דחף (JSON לכל מייל), מהישן לחדש."""
+        return self._cmd("LRANGE", self.MAIL, 0, -1) or []
+
+    def mail_trim(self, n: int):
+        """מוחק את n הראשונים (אלה שטופלו). מיילים שנדחפו בינתיים נשארים."""
+        if n > 0:
+            self._cmd("LTRIM", self.MAIL, n, -1)
+
+
 class FileStore:
     def __init__(self, path: str):
         self.path = path
@@ -267,6 +295,14 @@ class FileStore:
     def save(self, state):
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False)
+
+    mail: list = []
+
+    def mail_read(self):
+        return list(self.mail)
+
+    def mail_trim(self, n):
+        self.mail = self.mail[n:]
 
 
 # ---------------------------------------------------------------- LLM (optional)

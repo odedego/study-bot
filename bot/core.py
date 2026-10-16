@@ -26,6 +26,10 @@ from datetime import date, datetime, time, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import planner as P  # noqa: E402
 from bot import semester as SEM  # noqa: E402
+from bot.extras import ExtrasMixin  # noqa: E402
+from bot.lessons_cal import LessonsCalMixin  # noqa: E402
+from bot.mail import MailMixin  # noqa: E402
+from bot.marathon import MarathonMixin  # noqa: E402
 
 TZ = P.TZ
 HEB_DAY = P.HEB_DAY
@@ -81,7 +85,8 @@ class _GuardedCal:
         return getattr(self._cal, name)
 
     def _ok(self, cal_id):
-        if cal_id != self._bot.reviews_cal and not self._bot._approved:
+        own = (self._bot.reviews_cal, self._bot.lessons_cal_id())
+        if cal_id not in own and not self._bot._approved:
             raise PermissionError("כתיבה ליומן האישי בלי אישור מפורש חסומה")
 
     def create(self, cal_id, body):
@@ -105,7 +110,7 @@ def parse_local(v: str) -> datetime:
     return x.replace(tzinfo=TZ) if x.tzinfo is None else x.astimezone(TZ)
 
 
-class Bot:
+class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
     def __init__(self, tg, cal, feed, store, llm, cfg: dict, now_fn=None):
         self.tg, self.feed, self.store, self.llm = tg, feed, store, llm
         self._approved = False
@@ -264,7 +269,7 @@ class Bot:
         """תוכנית השבוע ← יומן החזרות. יוצר רק מה שחסר. לא מוחק ולא מזיז."""
         p = P._plan_for(ws, uni, personal, self.st)
         known = {x["key"] for x in self.st["sessions"]}
-        count = sum(1 for x in self.st["sessions"] if x.get("kind") != "weekly" and x.get("status") in ("planned", "done", "missed")
+        count = sum(1 for x in self.st["sessions"] if x.get("kind") in ("review", "rescheduled") and x.get("status") in ("planned", "done", "missed")
                     and ws.isoformat() <= x["start"][:10] < (ws + timedelta(days=7)).isoformat())
         keep, capped, past = [], [], []
         for x in p["sessions"]:
@@ -272,11 +277,11 @@ class Bot:
                 keep.append(x)
             elif datetime.fromisoformat(x["start"]) <= self.now:
                 past.append(x)          # שיעור שהופיע באיחור ושובץ לזמן שעבר: לא נרשם
-            elif x["kind"] != "weekly" and count >= self.WEEKLY_CAP:
-                capped.append(x)        # תקרה שבועית
+            elif x["kind"] in ("review", "rescheduled") and count >= self.WEEKLY_CAP:
+                capped.append(x)        # תקרה שבועית (תוספות של הבוט לא נספרות בה)
             else:
                 keep.append(x)
-                count += 1 if x["kind"] != "weekly" else 0
+                count += 1 if x["kind"] in ("review", "rescheduled") else 0
         p["sessions"] = keep
         p["capped"] = capped
         existing = self.reviews(ws - timedelta(days=1), 9)
@@ -310,7 +315,7 @@ class Bot:
         """השלמות רק בתוך השבוע הנוכחי, ובלי לעבור את התקרה השבועית (11). מה שלא נכנס: עודד מחליט."""
         ws = P.week_start(today)
         we = ws + timedelta(days=7)
-        count = sum(1 for s in self.st["sessions"] if s.get("kind") != "weekly" and s.get("status") in ("planned", "done", "missed")
+        count = sum(1 for s in self.st["sessions"] if s.get("kind") in ("review", "rescheduled") and s.get("status") in ("planned", "done", "missed")
                     and ws.isoformat() <= s["start"][:10] < we.isoformat())
         keep, extra = [], []
         for x in r["rescheduled"]:
@@ -443,6 +448,21 @@ class Bot:
                     self.st["bot"]["jobs"][key] = "failed"
                     self.tg.send(f"⚠️ {name} נכשל 3 פעמים ודילגתי עליו היום: {str(e)[:200]}")
             self.save_state()
+        if self.lessons_sync_due():
+            lc = self.st["bot"].setdefault("lessons_cal", {})
+            try:
+                msg = self.sync_lessons_cal()
+                lc.pop("fails", None)
+                if msg:
+                    self.tg.send("\n".join(msg))
+            except Exception as e:  # noqa: BLE001
+                lc["fails"] = lc.get("fails", 0) + 1
+                self.log.append(f"lessons cal: {type(e).__name__}: {str(e)[:200]}")
+                if lc["fails"] >= 3:
+                    lc["last"] = P.iso(self.now)   # לא מנסים שוב היום
+                    lc["incomplete"] = False
+                    self.warn_once("lessons-cal", f"⚠️ לא הצלחתי לעדכן את יומן השיעורים: {str(e)[:150]}")
+            self.save_state()
 
     def lessons_lines(self, uni, d: date) -> list[str]:
         return [f"• {P.fmt_t(l.start)}–{P.fmt_t(l.end)} {COURSES[l.course]['name']}" + (" (תרגול)" if l.kind == "תרגול" else "")
@@ -457,10 +477,21 @@ class Bot:
         return f"• {mark}{s['start'][11:16]} {strip_marks(P._session_from_state(s).title())}"
 
     def job_morning(self, today: date):
+        self._defer = []          # הצעות (מהמייל ומהמרתון) נשלחות אחרי הודעת הבוקר
+        try:
+            self._job_morning(today)
+        except Exception:
+            self._defer = None
+            self._mail_ack = None
+            raise
+        self.ack_mail()
+        self.flush_deferred()
+
+    def _job_morning(self, today: date):
         uni, personal, fc, changes = self.feed_and_adopt(today)
         lines = [f"☀️ בוקר טוב · {dd(today)}"]
         buttons, warn = [], []
-        moved, not_placed, created = [], [], []
+        moved, not_placed, created, mar_made = [], [], [], []
         if fc["block"]:
             warn.append("⚠️ לא שיבצתי היום: " + "; ".join(fc["reasons"]))
         else:
@@ -478,6 +509,7 @@ class Bot:
             p = self.sync_week(P.week_start(today), uni, personal)
             created = p["created"]
             not_placed += [f"• {x['title']} (השבוע כבר מלא, 11 סשנים)" for x in p["capped"]]
+            mar_made = self.mar_commit()
         ex = P.exc_notify(today, uni, personal, self.st, True)
 
         ls, ss = self.lessons_lines(uni, today), self.sessions_on(today)
@@ -486,6 +518,9 @@ class Bot:
             lines += ls + [self.sess_line(s) for s in ss]
         else:
             lines.append("היום אין שיעורים ואין סשנים.")
+        mlines = self.marathon_morning()
+        if mlines:
+            lines += [""] + mlines
         today_courses = {l.course for l in uni.lessons if l.day == today}
         syl = self.syllabus_lines(P.week_start(today), today_courses)
         if syl:
@@ -509,12 +544,17 @@ class Bot:
             lines += ["", "↪️ שובץ מחדש (לא סומן כבוצע):"] + moved
         if created:
             lines += ["", f"➕ נוספו ליומן {len(created)} סשנים חדשים."]
+        if mar_made:
+            lines += [""] + mar_made
         decide = [x for x in ex["new"] + ex["remind"] if x["type"] not in ("class_on_free_day",)]
         if not_placed or decide:
             lines += ["", "❓ צריך החלטה:"] + [f"• לא מצאתי מקום ל{x[1:].strip()}" for x in not_placed]
             for x in decide:
                 lines.append(f"• {x['text']}")
                 buttons.append([(f"👍 קיבלתי · {x['text'][:30]}", f"ack|{x['id']}")])
+        mail = self.process_mail()
+        if mail:
+            lines += [""] + mail
         if fc.get("duplicates") and not any(q.get("id") == "dup" for q in self.st["pending_questions"]):
             self.st["pending_questions"].append({"id": "dup", "text": "עותקים ידניים של שיעורים ביומן האישי", "asked": P.iso(self.now)})
             lines += ["", "💡 יש ביומן האישי עותקים ידניים של שיעורים. כדאי למחוק אותם, כדי שכל שיעור יופיע פעם אחת."]
@@ -615,6 +655,7 @@ class Bot:
         ws = P.week_start(today)
         rep = P.week_report(ws, self.st, self.now)
         nxt = today + timedelta(days=1)
+        buttons = []
         lines = [f"📊 סיכום שבוע · {ws.day}.{ws.month}–{today.day}.{today.month}"]
         if rep["total_planned"]:
             pct = round(100 * rep["total_done"] / rep["total_planned"])
@@ -637,14 +678,20 @@ class Bot:
             lines += ["", "⏳ המבחן הקרוב: " + self.exam_line(c, dt, n)]
             if n <= SEM.PREP_NOTICE_DAYS and "prep-notice" not in self.st["bot"]["seeded"]:
                 self.st["bot"]["seeded"].append("prep-notice")
-                lines += ["🎯 נשארו פחות מ-6 שבועות למבחן הראשון. זה הזמן לתכנן עם Claude את תקופת ההכנה למבחנים (סדר, ימי חזרה, מבחני תרגול). "
-                          "עד אז אני ממשיך כרגיל. כתוב \"מבחנים\" ללוח המלא."]
+                ms = date.fromisoformat(self.mar()["start"])
+                lines += [f"🎯 נשארו פחות מ-6 שבועות למבחן הראשון. מרתון המבחנים מתחיל ב-{dd(ms)}. "
+                          "כדאי לכתוב לי כבר עכשיו ימי מילואים ידועים (\"מילואים 3.1–10.1\"), כדי שהחלוקה תתחשב בהם. "
+                          "כתוב \"מרתון\" לתוכנית."]
+        ms = date.fromisoformat(self.mar()["start"])
+        if self.mar_active(nxt) or (0 <= (ms - today).days <= 14 and self.mar()["status"] == "scheduled"):
+            lines += [""] + self.marathon_text().split("\n")[:12]
+            if self.mar()["status"] == "scheduled" and (ms - today).days > 0:
+                buttons.append([("⏩ להקדים בשבוע", "mar|shift|-7"), ("⏸ לדחות בשבוע", "mar|shift|7")])
         if rep["weak_topics"]:
             lines += ["", "🔍 חלש השבוע:"] + [f"• {w['course']}: {w.get('unclear') or w.get('topics') or ''} ({w.get('rating') or '?'}/5)" for w in rep["weak_topics"][:5]]
         fl = self.feed_lines(fc)
         if fl:
             lines += ["", "🔄 שינויים במערכת:"] + fl
-        buttons = []
         if fc["block"]:
             lines += ["", "⚠️ לא שיבצתי את השבוע הבא: " + "; ".join(fc["reasons"])]
         else:
@@ -659,11 +706,16 @@ class Bot:
             lines.append(f"• {x['text']}")
             buttons.append([(f"👍 קיבלתי · {x['text'][:30]}", f"ack|{x['id']}")])
         if rep["weeks_since_start"] == 2:
+            cl, cb = self.calibration_lines(ws)
+            lines += [""] + cl
+            buttons += cb
             lines += ["", "שאלה לכל קורס: החומר מצטבר (כל שיעור נבנה על הקודם) או שמספיק רענון כל 3 שבועות?"]
             for c in P.COURSE_ORDER:
                 buttons.append([(COURSES[c]["name"], "noop"), ("מצטבר", f"kind|{c}|cumulative"), ("רענון", f"kind|{c}|refresh")])
         lines += ["", "לשנות משהו בשבוע הבא? פשוט כתוב לי."]
-        self.tg.send("\n".join(lines), buttons or None)
+        mid = self.tg.send("\n".join(lines), buttons or None)
+        if any(d.startswith(("tgt|", "mar|")) for row in buttons for _, d in row):
+            self.st["bot"]["msgs"][str(mid)] = {"type": "weekly", "buttons": buttons}
 
     # ------------------------------------------------------------ telegram updates
     def handle_updates(self):
@@ -707,11 +759,13 @@ class Bot:
             return
         if kind == "rate":
             _, c, d, n = parts
-            self.add_recap(d, c, rating=int(n))
+            note = self.add_recap(d, c, rating=int(n))
             self.st["bot"]["attend"].setdefault(f"{c}|{d}", "present")
             reply = f"נרשם: {COURSES[c]['name']} {n}/5"
             meta = self.st["bot"]["msgs"].get(str(mid), {})
             self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [c])))
+            if note:
+                self.tg.send(note)
         elif kind == "rateall":
             d = parts[1]
             meta = self.st["bot"]["msgs"].get(str(mid), {})
@@ -758,6 +812,23 @@ class Bot:
         elif kind == "pp":
             _, act, pid = parts
             reply = self.exec_personal(pid) if act == "ok" else self.cancel_personal(pid)
+        elif kind == "mar":
+            _, act, v = parts
+            if act == "free":
+                reply = self.mar_free(v)
+            else:
+                ms = date.fromisoformat(self.mar()["start"]) + timedelta(days=int(v))
+                reply = self.mar_set_start(ms.isoformat())
+            self.tg.send(reply)
+        elif kind == "xp":
+            _, act, xid = parts
+            reply = self.exec_extra(xid) if act == "ok" else self.cancel_extra(xid)
+        elif kind == "tgt":
+            _, c, delta = parts
+            reply = self.set_target(c, P.target_of(c, self.st) + int(delta))
+            rows = self._replace_row(mid, c)
+            if rows:
+                self.tg.edit_buttons(mid, rows)
         elif kind == "restore":
             s = self.by_short(parts[1])
             if s and s.get("status") == "dropped":
@@ -766,6 +837,15 @@ class Bot:
             else:
                 reply = "כבר ביומן"
         self.tg.answer(q["id"], reply)
+
+    def _replace_row(self, mid, c: str):
+        meta = self.st["bot"]["msgs"].get(str(mid), {})
+        rows = meta.get("buttons")
+        if not rows:
+            return None
+        rows = [self.target_row(c) if any(d == f"tgt|{c}|1" for _, d in row) else [tuple(b) for b in row] for row in rows]
+        meta["buttons"] = rows
+        return rows
 
     def refresh_daily(self, mid):
         meta = self.st["bot"]["msgs"].get(str(mid), {})
@@ -783,6 +863,9 @@ class Bot:
             cur["topics"] = (cur["topics"] + "; " if cur["topics"] else "") + topics
         if unclear:
             cur["unclear"] = (cur["unclear"] + "; " if cur["unclear"] else "") + unclear
+        if cur.get("rating") is not None and cur["rating"] <= 2:
+            return self.maybe_reinforce(course, d, cur["rating"], cur.get("unclear", ""))
+        return ""
 
     # ------------------------------------------------------------ free text
     def on_text(self, m: dict):
@@ -810,6 +893,9 @@ class Bot:
             return
         if cmd in ("/check", "בדיקה"):
             self.tg.send(self.health_text("🔧 בדיקת חיבורים"))
+            return
+        if cmd in ("/marathon", "מרתון"):
+            self.tg.send(self.marathon_text())
             return
         if cmd in ("/absences", "היעדרויות", "נוכחות"):
             self.tg.send(self.attendance_text())
@@ -900,7 +986,8 @@ class Bot:
                            "syllabus_this_week": SEM.topics_for_week(P.week_start(today)),
                            "semester_end": SEM.SEMESTER_END.isoformat(),
                            "absences": {c: self.absences(c) for c in COURSES if self.absences(c)},
-                           "open_assignments": [a for a in self.st["assignments"] if a.get("status") != "done"]},
+                           "open_assignments": [a for a in self.st["assignments"] if a.get("status") != "done"],
+                           "marathon": self.marathon_ctx()},
                           ensure_ascii=False)
 
     def free_text(self, text: str, media: dict | None = None):
@@ -928,7 +1015,7 @@ class Bot:
         except json.JSONDecodeError:
             plan = {}
         done = []
-        self._pp_queue = []
+        self._defer = []
         for a in plan.get("actions", [])[:12]:
             if media and not (a.get("action") in MEDIA_ACTIONS and (a.get("action") != "personal" or a.get("op") == "create")):
                 # טקסט בתוך תמונה הוא מידע, לא הוראה: מקובץ מותר רק להציע הוספה, לרשום מטלה או הערה
@@ -945,9 +1032,9 @@ class Bot:
         try:
             self.tg.send(body)
         finally:
-            queue, self._pp_queue = self._pp_queue or [], None
-        for pid in queue:
-            self.send_pp(pid)
+            queue, self._defer = self._defer or [], None
+        for fn in queue:
+            fn()
 
     def apply_action(self, a: dict) -> str:
         act = a.get("action")
@@ -964,8 +1051,8 @@ class Bot:
             d = a.get("date") or self.now.date().isoformat()
             rating = a.get("rating")
             rating = int(rating) if rating not in (None, "") and 1 <= int(rating) <= 5 else None
-            self.add_recap(d, c, rating, a.get("topics", ""), a.get("unclear", ""))
-            return f"📝 ריקאפ {COURSES[c]['name']} נשמר"
+            note = self.add_recap(d, c, rating, a.get("topics", ""), a.get("unclear", ""))
+            return f"📝 ריקאפ {COURSES[c]['name']} נשמר" + (f"\n{note}" if note else "")
         if act == "assignment":
             c = a.get("course")
             if c not in COURSES:
@@ -974,11 +1061,24 @@ class Bot:
             date.fromisoformat(due) if due else None
             for y in self.st["assignments"]:
                 if y["course"] == c and y["title"] == a.get("title", "") and y.get("due") == due:
+                    if a.get("est_min") and not y.get("est_min"):
+                        y["est_min"] = int(a["est_min"])
+                        note = self.maybe_assignment_time(y)
+                        return f"📝 עדכנתי: {y['title']} · כ-{y['est_min']} דק'" + (f"\n{note}" if note else "")
                     return f"📝 המטלה כבר רשומה: {y['title']}"
             x = {"id": f"{c}-{sid(c + a.get('title', '') + str(due))[:5]}", "course": c, "title": a.get("title", ""),
-                 "due": due, "est_min": a.get("est_min"), "status": "open", "added": P.iso(self.now)}
+                 "due": due, "est_min": int(a["est_min"]) if a.get("est_min") else None, "status": "open", "added": P.iso(self.now)}
             self.st["assignments"].append(x)
-            return f"📝 מטלה: {COURSES[c]['name']} · {x['title']} עד {due or '?'}" + ("" if x["est_min"] else " (כמה זמן זה ייקח?)")
+            note = self.maybe_assignment_time(x)
+            return (f"📝 מטלה: {COURSES[c]['name']} · {x['title']} עד {due or '?'}" + ("" if x["est_min"] else " (כמה זמן זה ייקח?)")
+                    + (f"\n{note}" if note else ""))
+        if act == "assignment_time":
+            for y in self.st["assignments"]:
+                if y["id"] == a.get("id"):
+                    y["est_min"] = int(a.get("est_min") or 0) or None
+                    note = self.maybe_assignment_time(y)
+                    return f"📝 {y['title']}: כ-{y['est_min']} דק'" + (f"\n{note}" if note else "")
+            raise ValueError("מטלה לא ידועה")
         if act == "assignment_done":
             for x in self.st["assignments"]:
                 if x["id"] == a.get("id"):
@@ -1012,8 +1112,20 @@ class Bot:
             self.restore(s)
             return f"↩️ הוחזר: {strip_marks(P._session_from_state(s).title())}"
         if act == "capacity":
-            self.st["pending_questions"].append({"id": f"cap-{a.get('date', '')}", "text": f"קיבולת {a.get('date', '')}: {a.get('text', '')}", "asked": P.iso(self.now)})
-            return "📌 רשמתי. בינתיים אני לא מסדר את השבוע מחדש לבד לפי זה: תגיד לי מה להזיז, ואזיז."
+            return self.apply_capacity(a.get("date") or "", a.get("max_sessions"), bool(a.get("free_day")), a.get("text", ""))
+        if act == "target":
+            return self.set_target(a.get("course"), a.get("weekly"))
+        if act == "extra":
+            c = a.get("course")
+            if c not in COURSES:
+                raise ValueError("קורס לא ידוע")
+            first = date.fromisoformat(a["date"]) if a.get("date") else self.now.date()
+            slots = self.find_slots(1, first, first if a.get("date") else first + timedelta(days=4), c, budget=False)
+            if not slots:
+                return f"לא מצאתי זמן פנוי ל{COURSES[c]['name']}" + (f" ב-{dd(first)}" if a.get("date") else " בימים הקרובים") + "."
+            self.propose_extra("extra", c, f"📚 תרגול נוסף · {COURSES[c]['name']}", a.get("note") or "תרגול נוסף לבקשתך.",
+                               slots, f"תרגול נוסף ב{COURSES[c]['name']}, כמו שביקשת.", ref=P.iso(self.now)[:16])
+            return ""
         if act == "attendance":
             return "🙋 " + self.set_attendance(a.get("course"), a.get("date") or self.now.date().isoformat(), a.get("status"))
         if act == "personal":
@@ -1021,6 +1133,16 @@ class Bot:
         if act == "note":
             self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": a.get("text", "")})
             return ""
+        if act == "practice_exam":
+            return self.mar_score(a.get("course"), a.get("score"), a.get("date"))
+        if act == "marathon_block":
+            return self.mar_block(a.get("from") or a.get("date"), a.get("to"), a.get("reason") or "")
+        if act == "marathon_unblock":
+            return self.mar_unblock(a.get("from") or a.get("date"), a.get("to"))
+        if act == "marathon_need":
+            return self.mar_set_need(a.get("course"), a.get("sessions"))
+        if act == "marathon_start":
+            return self.mar_set_start(a.get("date"))
         return ""
 
     # ------------------------------------------------------------ exams & syllabus
@@ -1186,11 +1308,20 @@ class Bot:
                 p["warn"] = "בזמן הזה יש " + ", ".join(f"{COURSES[l.course]['name']} ({P.fmt_t(l.start)}–{P.fmt_t(l.end)})" for l in hit)
         pid = sid(json.dumps(p, sort_keys=True, ensure_ascii=False))[:8]
         self.st["bot"]["pp"][pid] = p
-        if getattr(self, "_pp_queue", None) is not None:
-            self._pp_queue.append(pid)      # נשלח אחרי התשובה, כדי שההסבר יופיע לפני הכפתורים
-        else:
-            self.send_pp(pid)
+        self.deferred(lambda: self.send_pp(pid))
         return ""
+
+    def deferred(self, fn):
+        """בתוך תשובה לעודד: הכפתורים נשלחים אחרי ההסבר. אחרת: מיד."""
+        if getattr(self, "_defer", None) is not None:
+            self._defer.append(fn)
+        else:
+            fn()
+
+    def flush_deferred(self):
+        queue, self._defer = getattr(self, "_defer", None) or [], None
+        for fn in queue:
+            fn()
 
     def send_pp(self, pid: str):
         p = self.st["bot"]["pp"][pid]
@@ -1288,19 +1419,22 @@ class Bot:
 
 
 HELP = """אני בוט הלימודים שלך 📚
-• בבוקר (7:44): מה יש היום, שינויים במערכת, מה צריך החלטה.
-• 20 דק׳ אחרי השיעור האחרון: ריקאפ. ציון בכפתור, ואת השאר כותבים חופשי.
-• 21:30: מה בוצע היום, ומה מחר.
-• מוצ״ש 21:00: סיכום שבוע ותוכנית לשבוע הבא.
+• בבוקר (7:44): מה יש היום, שינויים במערכת, מיילים חשובים מהאוניברסיטה, מה צריך החלטה.
+• 20 דק׳ אחרי השיעור האחרון: ריקאפ. ציון וכפתורי נוכחות, ואת השאר כותבים חופשי.
+• 21:30: מה בוצע היום, ומה מחר. מוצ״ש 21:00: סיכום שבוע ותוכנית לשבוע הבא.
 
-פקודות: היום · מחר · שבוע · מבחנים · היעדרויות · בדיקה
-בריקאפ יש גם כפתורי נוכחות (הייתי / לא הייתי / מילואים), ואני סופר היעדרויות מול המגבלה בכל קורס.
-אפשר לכתוב חופשי, למשל: "עשיתי את מתמטיקה", "תזיז את כלכלה של מחר ל-10:00", "מטלה באקסל עד 5.11, שעתיים".
+פקודות: היום · מחר · שבוע · מבחנים · מרתון · היעדרויות · בדיקה
 
-היומן האישי: אפשר לבקש "תזיז את הרופא של רביעי ל-12:00" או "תבטל את האימון מחר".
-אפשר גם לשלוח תמונה או PDF: צילום של הזמנה לחתונה, הודעה על פגישה, הנחיות למטלה עם דדליין.
-אני קורא ממנו תאריך, שעה ומקום ומציע אירוע ליומן (ומטלה במעקב, אם זה קורס).
-אני אף פעם לא משנה אותו לבד: אני שולח הצעה, ומבצע רק אחרי שתלחץ ✅ אשר."""
+אפשר לכתוב חופשי, למשל:
+"עשיתי את מתמטיקה" · "תזיז את כלכלה של מחר ל-10:00" · "מטלה באקסל עד 5.11, שעתיים"
+"מחר רק סשן אחד" · "מחר פנוי כל היום" · "מחר אני במילואים"
+"מילואים 3.1–10.1" · "מבחן תרגול במבוא 85" · "במרתון תן למשפט 8"
+
+תוספות (רק באישור ✅, עד 2 בשבוע מעבר ל-11): חיזוק אחרי ריקאפ בציון 1–2, זמן עבודה למטלה של שעה ומעלה, תרגול ביום פנוי.
+
+תמונה או PDF (הזמנה, תור, הנחיות עם דדליין): אני קורא תאריך, שעה ומקום ומציע אירוע ליומן.
+היומן האישי: אני אף פעם לא משנה אותו לבד. שולח הצעה, ומבצע רק אחרי ✅ אשר.
+מרתון מבחנים: מ-28.12, חלוקת ימים לפי סדר המבחנים, 3 ימים ביומן מראש. "מרתון" מציג את התוכנית."""
 
 # תמונות: טלגרם מכווץ תמונה רגילה לפחות מ-1MB. מגבלת Claude לתמונה היא 5MB אחרי base64, ולכן 3.7MB גולמי.
 MEDIA_LIMITS = {"image/jpeg": 3_700_000, "image/png": 3_700_000, "image/webp": 3_700_000, "image/gif": 3_700_000,
@@ -1319,7 +1453,18 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 {"action":"assignment_done","id":"..."}
 {"action":"move","id":"...","start":"YYYY-MM-DDTHH:MM","late_ok":false}   late_ok=true רק אם עודד ביקש במפורש ללמוד אחרי 23:00
 {"action":"restore","id":"..."}         להחזיר סשן שנמחק (status=dropped)
-{"action":"capacity","date":"YYYY-MM-DD","text":"מה אמר על הזמן הפנוי"}
+{"action":"capacity","date":"YYYY-MM-DD","max_sessions":מספר או null,"free_day":false,"text":"מה אמר"}
+    כמה סשנים הוא יכול ביום מסוים. "מחר רק סשן אחד" = 1, "מחר אין לי זמן" / "מחר במילואים" = 0 (הבוט מזיז את העודף לימים אחרים).
+    "מחר פנוי כל היום" = free_day=true (הבוט מציע תרגול נוסף). לא ברור כמה = max_sessions null.
+{"action":"assignment_time","id":"id מתוך open_assignments","est_min":מספר}   כמה זמן מטלה קיימת תיקח
+{"action":"extra","course":"...","date":"YYYY-MM-DD או null","note":"..."}   סשן נוסף, רק כשעודד ביקש במפורש ("תוסיף לי תרגול במתמטיקה מחר")
+{"action":"target","course":"...","weekly":מספר}   יעד סשנים שבועי לקורס, רק כשעודד ביקש לשנות
+{"action":"practice_exam","course":"...","score":0-100,"date":"YYYY-MM-DD או null"}   ציון במבחן תרגול (שליטה = 90 ומעלה)
+{"action":"marathon_block","from":"YYYY-MM-DD","to":"YYYY-MM-DD או null","reason":"מילואים / מנוחה / ..."}
+    ימים בלי לימוד בתקופת המבחנים (מרתון). גם אם המרתון עוד לא התחיל. "יום מנוחה אחרי המבחן" = marathon_block עם reason מנוחה.
+{"action":"marathon_unblock","from":"YYYY-MM-DD","to":"YYYY-MM-DD או null"}   ביטול חסימה
+{"action":"marathon_need","course":"...","sessions":מספר}   כמה סשנים קורס צריך במרתון
+{"action":"marathon_start","date":"YYYY-MM-DD"}   הזזת תחילת המרתון
 {"action":"attendance","course":"...","date":"YYYY-MM-DD","status":"present|absent|reserve"}   נוכחות בשיעור. absent = לא הגיע. reserve = מילואים (לא נספר כהיעדרות)
 {"action":"note","text":"..."}           כל מידע אחר שכדאי לזכור
 {"action":"personal","op":"move|delete|create","event":"id מתוך personal_events (ל-move/delete)","start":"YYYY-MM-DDTHH:MM","end":"YYYY-MM-DDTHH:MM או null","title":"רק ל-create","location":"ל-create, אם ידוע","description":"ל-create, פרטים נוספים בקצרה"}
@@ -1332,6 +1477,8 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 - תאריכים יחסיים ("מחר", "ביום רביעי") מחשבים מ-now.
 - אם משהו לא ברור, אל תנחש פעולה: שאל ב-reply ו-actions ריק.
 - סשני לימוד (sessions) מזיזים עם move. אירועים אישיים (personal_events) רק עם personal.
+- מילואים בימי לימודים: attendance reserve לכל שיעור באותו יום (מתוך lessons) וגם capacity עם max_sessions=0.
+  מילואים בתקופת המבחנים (marathon.start ואילך) או טווח ימים: marathon_block.
 - ב-reply של שינוי אישי כתוב שנשלחה הצעה לאישור, לא שזה בוצע.
 - שאלות על מבחנים, נושאי השבוע לפי הסילבוס או היעדרויות: ענה מתוך exams_moed_a, syllabus_this_week ו-absences.
 - אתה לא מרצה ולא מסביר חומר. אם הוא שואל שאלה על לוח הזמנים, ענה מתוך ההקשר בלבד
