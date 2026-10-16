@@ -31,7 +31,14 @@ def build(require_chat=True):
     return Bot(tg, cal, feed, store, llm, cfg), tg, cal, feed, store, llm, cfg
 
 
+ACTIVE_HOURS = (7, 23)   # שעון ישראל. בלילה הבוט לא עושה כלום (מה שנכתב בלילה מטופל ב-07:00)
+
+
 def tick():
+    h = datetime.now(TZ).hour
+    if not ACTIVE_HOURS[0] <= h < ACTIVE_HOURS[1] and env("FORCE_TICK") != "1":
+        print(f"לילה ({h}:xx שעון ישראל): לא רץ")
+        return
     bot, *_ = build()
     bot.now = bot.now_fn()
     bot.load_state()   # אם זה נכשל: לא ממשיכים ולא שומרים כלום
@@ -60,6 +67,24 @@ def check():
     step("Google (חשבון שירות)", lambda: cal.email)
     step("יומן חזרות", lambda: f"{len(cal.list(cfg['REVIEWS_CAL'], now.isoformat(), (now + timedelta(days=14)).isoformat()))} אירועים בשבועיים הקרובים")
     step("יומן אישי", lambda: f"{len(cal.list(cfg['PERSONAL_CAL'], now.isoformat(), (now + timedelta(days=14)).isoformat()))} אירועים" if cfg["PERSONAL_CAL"] else "לא הוגדר")
+
+    def role():
+        if not cfg["PERSONAL_CAL"]:
+            return "לא הוגדר"
+        r = cal.access_role(cfg["PERSONAL_CAL"])
+        if r in ("writer", "owner"):
+            return "כתיבה (רק אחרי ✅ שלך)"
+        raise RuntimeError(f"קריאה בלבד ({r}): הוספה מתמונות ושינויים שאישרת ייכשלו. "
+                           "צריך לשנות את השיתוף של חשבון study-bot ל\"ביצוע שינויים באירועים\"")
+    step("הרשאה ליומן האישי", role)
+
+    def rev_write():
+        body = {"summary": "בדיקת חיבור (נמחק מיד)", "start": {"dateTime": (now + timedelta(days=30)).isoformat()},
+                "end": {"dateTime": (now + timedelta(days=30, minutes=5)).isoformat()}}
+        eid = cal.create(cfg["REVIEWS_CAL"], body)["id"]
+        cal.delete(cfg["REVIEWS_CAL"], eid)
+        return "יצירה ומחיקה עובדות"
+    step("כתיבה ליומן חזרות", rev_write)
 
     def f():
         t = feed.fetch()

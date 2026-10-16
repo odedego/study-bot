@@ -50,15 +50,36 @@ def _check(r, what):
 # ---------------------------------------------------------------- Telegram
 class Telegram:
     def __init__(self, token: str, chat_id: str):
+        self.token = token
         self.base = f"https://api.telegram.org/bot{token}"
         self.chat_id = str(chat_id) if chat_id else ""
 
+    def _safe(self, e: Exception) -> RuntimeError:
+        """שגיאות רשת של requests כוללות את ה-URL, ובו הטוקן. הלוגים של repo ציבורי גלויים, אז מוחקים אותו."""
+        return RuntimeError(str(e).replace(self.token, "***") if self.token else str(e))
+
     def _call(self, method: str, **params):
         def go():
-            r = requests.post(f"{self.base}/{method}", json=params, timeout=TIMEOUT)
+            try:
+                r = requests.post(f"{self.base}/{method}", json=params, timeout=TIMEOUT)
+            except requests.RequestException as e:
+                raise self._safe(e) from None
             _check(r, f"telegram {method}")
             return r.json()["result"]
         return _retry(go, tries=1 if method == "answerCallbackQuery" else 3)
+
+    def download(self, file_id: str) -> bytes:
+        """קובץ ששלחו לבוט (תמונה / PDF). טלגרם מאפשר עד 20MB."""
+        path = self._call("getFile", file_id=file_id)["file_path"]
+
+        def go():
+            try:
+                r = requests.get(f"https://api.telegram.org/file/bot{self.token}/{path}", timeout=60)
+            except requests.RequestException as e:
+                raise self._safe(e) from None
+            _check(r, "telegram file")
+            return r.content
+        return _retry(go)
 
     @staticmethod
     def _markup(buttons):
@@ -155,6 +176,17 @@ class Calendar:
                 return {"id": body["id"], "duplicate": True}
             raise
 
+    def access_role(self, cal_id: str) -> str:
+        """ההרשאה של חשבון השירות ליומן (reader / writer / owner). מוסיף את היומן לרשימה של חשבון השירות
+        עצמו אם צריך: זה לא משנה כלום אצל עודד."""
+        url = f"{self.API}/users/me/calendarList/{requests.utils.quote(cal_id, safe='')}"
+        try:
+            return self._req("GET", url).get("accessRole", "")
+        except Permanent as ex:
+            if " 404" not in str(ex):
+                raise
+        return self._req("POST", f"{self.API}/users/me/calendarList", json={"id": cal_id}).get("accessRole", "")
+
     def patch(self, cal_id: str, event_id: str, body: dict) -> dict:
         return self._req("PATCH", f"{self.API}/calendars/{requests.utils.quote(cal_id)}/events/{event_id}", json=body)
 
@@ -244,12 +276,19 @@ class Claude:
     def __init__(self, api_key: str, model: str):
         self.key, self.model = api_key, model
 
-    def complete(self, system: str, user: str, max_tokens: int = 800) -> str:
+    def complete(self, system: str, user: str, max_tokens: int = 800, media: dict | None = None) -> str:
+        """media = {"mime": "image/jpeg" | ... | "application/pdf", "data": base64}: תמונה או PDF לפני הטקסט."""
+        content: list | str = user
+        if media:
+            kind = "document" if media["mime"] == "application/pdf" else "image"
+            content = [{"type": kind, "source": {"type": "base64", "media_type": media["mime"], "data": media["data"]}},
+                       {"type": "text", "text": user}]
+
         def go():
-            r = requests.post("https://api.anthropic.com/v1/messages", timeout=60, headers={
+            r = requests.post("https://api.anthropic.com/v1/messages", timeout=90 if media else 60, headers={
                 "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
                 json={"model": self.model, "max_tokens": max_tokens, "system": system,
-                      "messages": [{"role": "user", "content": user}]})
+                      "messages": [{"role": "user", "content": content}]})
             _check(r, "claude")
             return "".join(b.get("text", "") for b in r.json().get("content", []))
         return _retry(go, tries=2)

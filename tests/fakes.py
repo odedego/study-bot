@@ -60,6 +60,27 @@ class FakeTelegram:
     def msg(self, mid):
         return next(m for m in self.sent if m["id"] == mid)
 
+    files: dict = {}
+
+    def download(self, file_id):
+        return self.files[file_id]
+
+    def user_media(self, kind, file_id, data, caption="", chat=None, mime="image/jpeg"):
+        """kind = photo / document. photo מגיע כמו בטלגרם: כמה גדלים, הגדול אחרון."""
+        self.files = dict(self.files, **{file_id: data})
+        msg = {"chat": {"id": int(chat or self.chat_id)}}
+        if kind == "photo":
+            msg["photo"] = [{"file_id": "thumb", "file_size": 900, "width": 90, "height": 90},
+                            {"file_id": file_id, "file_size": len(data), "width": 1280, "height": 960}]
+        else:
+            msg["document"] = {"file_id": file_id, "file_size": len(data), "mime_type": mime, "file_name": "x"}
+        if caption:
+            msg["caption"] = caption
+        self.inbox.append({"update_id": next(self._uid), "message": msg})
+
+    def user_raw(self, msg, chat=None):
+        self.inbox.append({"update_id": next(self._uid), "message": dict(msg, chat={"id": int(chat or self.chat_id)})})
+
     def user_text(self, text, chat=None):
         self.inbox.append({"update_id": next(self._uid), "message": {"chat": {"id": int(chat or self.chat_id)}, "text": text}})
 
@@ -121,6 +142,11 @@ class FakeCalendar:
         self.calls.append(("patch", cal, eid))
         return self.cals[cal][eid]
 
+    roles: dict = {}
+
+    def access_role(self, cal):
+        return self.roles.get(cal, "writer")
+
     def delete(self, cal, eid):
         self.cals.get(cal, {}).pop(eid, None)
         self.deleted.add(eid)
@@ -168,6 +194,8 @@ class FakeLLM:
         self.calls = []
         self.script = []  # רשימת תשובות JSON לפי הסדר
 
-    def complete(self, system, user, max_tokens=800):
+    def complete(self, system, user, max_tokens=800, media=None):
         self.calls.append(user)
+        self.media = getattr(self, "media", []) + [media]
+        self.systems = getattr(self, "systems", []) + [system]
         return json.dumps(self.script.pop(0) if self.script else {"actions": [], "reply": "קיבלתי"}, ensure_ascii=False)
