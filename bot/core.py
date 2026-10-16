@@ -808,6 +808,9 @@ class Bot:
         if cmd in ("/exams", "מבחנים"):
             self.tg.send(self.exams_text())
             return
+        if cmd in ("/check", "בדיקה"):
+            self.tg.send(self.health_text("🔧 בדיקת חיבורים"))
+            return
         if cmd in ("/absences", "היעדרויות", "נוכחות"):
             self.tg.send(self.attendance_text())
             return
@@ -817,6 +820,23 @@ class Bot:
             self.tg.send(P.plan_text(p))
             return
         self.free_text(text)
+
+    # ------------------------------------------------------------ health
+    def health_text(self, head: str) -> str:
+        from bot import health
+        cfg = {"REVIEWS_CAL": self.reviews_cal, "PERSONAL_CAL": self.personal_cal}
+        return head + "\n" + "\n".join(health.run(self.tg, self.cal, self.feed, self.store, self.llm, cfg, self.now))
+
+    def after_deploy(self, sha: str):
+        """פעם אחת אחרי כל עדכון קוד: בדיקת חיבורים קצרה בטלגרם, כדי שתקלה בעדכון תתגלה מיד."""
+        b = self.st["bot"]
+        if not sha or b.get("deployed") == sha:
+            return
+        b["deployed"] = sha
+        try:
+            self.tg.send(self.health_text(f"🔧 עדכון לבוט עלה ({sha}). בדיקת חיבורים:"))
+        except Exception as e:  # noqa: BLE001
+            self.log.append(f"after_deploy: {e}")
 
     # ------------------------------------------------------------ images / PDF
     def on_media(self, m: dict):
@@ -1103,6 +1123,8 @@ class Bot:
             body += f"\n📍 {p['location']}"
         if p.get("description"):
             body += f"\n📝 {p['description'][:300]}"
+        if p.get("warn"):
+            body += f"\n⚠️ {p['warn']}"
         if p.get("recurring"):
             body += "\n(אירוע חוזר: רק המופע הזה)"
         return "🗓️ שינוי ביומן האישי שלך, מחכה לאישור:\n" + body
@@ -1156,6 +1178,12 @@ class Bot:
             dup = self._personal_duplicate(p)
             if dup:
                 return f"📅 כבר יש ביומן שלך «{dup}» באותו זמן, אז לא הצעתי שוב."
+        if op in ("move", "create") and not p.get("all_day"):
+            a0, a1 = datetime.fromisoformat(p["new_start"]), datetime.fromisoformat(p["new_end"])
+            uni, _ = self.load_uni()
+            hit = [l for l in uni.lessons if a0 < l.end and l.start < a1]
+            if hit:
+                p["warn"] = "בזמן הזה יש " + ", ".join(f"{COURSES[l.course]['name']} ({P.fmt_t(l.start)}–{P.fmt_t(l.end)})" for l in hit)
         pid = sid(json.dumps(p, sort_keys=True, ensure_ascii=False))[:8]
         self.st["bot"]["pp"][pid] = p
         if getattr(self, "_pp_queue", None) is not None:
@@ -1265,7 +1293,7 @@ HELP = """אני בוט הלימודים שלך 📚
 • 21:30: מה בוצע היום, ומה מחר.
 • מוצ״ש 21:00: סיכום שבוע ותוכנית לשבוע הבא.
 
-פקודות: היום · מחר · שבוע · מבחנים · היעדרויות
+פקודות: היום · מחר · שבוע · מבחנים · היעדרויות · בדיקה
 בריקאפ יש גם כפתורי נוכחות (הייתי / לא הייתי / מילואים), ואני סופר היעדרויות מול המגבלה בכל קורס.
 אפשר לכתוב חופשי, למשל: "עשיתי את מתמטיקה", "תזיז את כלכלה של מחר ל-10:00", "מטלה באקסל עד 5.11, שעתיים".
 

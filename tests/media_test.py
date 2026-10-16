@@ -179,6 +179,21 @@ def main():
     tick()
     check("מפתח Claude" in tg.sent[-1]["text"], "no API key → explains")
 
+    print("== אירוע אישי שנופל על שיעור: אזהרה בהצעה")
+    from tests.timetable import semester
+    tg2, llm2 = FakeTelegram(), FakeLLM()
+    b2 = Bot(tg2, FakeCalendar(), FakeFeed(semester()), MemStore(), llm2, {"REVIEWS_CAL": REV, "PERSONAL_CAL": PERS}, clock)
+    b2.now = clock()
+    b2.load_state()
+    llm2.script.append({"reply": "", "actions": [{"action": "personal", "op": "create", "title": "ספר", "start": "2026-10-29T17:00"}]})
+    tg2.user_text("תוסיף ספר בחמישי הבא ב-17")
+    b2.handle_updates()
+    check("⚠️ בזמן הזה יש כלכלה (15:45–19:00)" in tg2.sent[-1]["text"], "proposal warns about the overlapping economics lesson")
+    llm2.script.append({"reply": "", "actions": [{"action": "personal", "op": "create", "title": "ספר", "start": "2026-10-22T17:00"}]})
+    tg2.user_text("תוסיף ספר בחמישי ב-17")
+    b2.handle_updates()
+    check("⚠️" not in tg2.sent[-1]["text"], "no warning when that lesson is cancelled (22.10)")
+
     print("\nFAILS:", FAILS)
     return 1 if FAILS else 0
 
