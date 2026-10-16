@@ -188,8 +188,18 @@ class Upstash:
     KEY = "study-bot:state"
 
     def __init__(self, url: str, token: str):
-        self.url = url.rstrip("/")
-        self.h = {"Authorization": f"Bearer {token}"}
+        self.url = self.clean(url).rstrip("/")
+        if self.url and not self.url.startswith("http"):
+            self.url = "https://" + self.url
+        self.h = {"Authorization": f"Bearer {self.clean(token)}"}
+
+    @staticmethod
+    def clean(v: str) -> str:
+        """סלחני להדבקה: מקבל גם 'UPSTASH_REDIS_REST_URL="https://..."' או ערך עם מרכאות."""
+        v = (v or "").strip()
+        if v.startswith("UPSTASH_") and "=" in v:
+            v = v.split("=", 1)[1]
+        return v.strip().strip('"').strip("'").strip()
 
     def load(self) -> dict | None:
         def go():
