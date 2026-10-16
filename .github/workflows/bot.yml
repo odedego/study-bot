@@ -2,7 +2,7 @@ name: study-bot
 
 on:
   schedule:
-    - cron: "7,22,37,52 * * * *"   # גיבוי בלבד. ההפעלה הרגילה כל 2 דקות מגיעה מ-Upstash QStash (workflow_dispatch)
+    - cron: "7,22,37,52 4-21 * * *"   # גיבוי בלבד, ביום (UTC 4-21 = בערך 07:00-23:00 בישראל, קיץ וחורף). ההפעלה הרגילה כל דקה מגיעה מ-Upstash QStash
     - cron: "17 3 * * 1"       # keepalive שבועי: GitHub מכבה cron ב-repo ציבורי אחרי 60 יום בלי פעילות
   workflow_dispatch:
     inputs:
