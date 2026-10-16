@@ -1121,10 +1121,15 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
                 raise ValueError("קורס לא ידוע")
             first = date.fromisoformat(a["date"]) if a.get("date") else self.now.date()
             slots = self.find_slots(1, first, first if a.get("date") else first + timedelta(days=4), c, budget=False)
+            why = f"תרגול נוסף ב{COURSES[c]['name']}, כמו שביקשת."
+            if not slots and a.get("date"):
+                # היום המבוקש מלא או ערב ארוך (שני/רביעי): מציעים את הזמן הפנוי הקרוב
+                slots = self.find_slots(1, first + timedelta(days=1), first + timedelta(days=4), c, budget=False)
+                why = f"ב-{dd(first)} אין מקום לפי הכללים (יום ארוך או מלא), אז הצעתי את הזמן הפנוי הקרוב."
             if not slots:
-                return f"לא מצאתי זמן פנוי ל{COURSES[c]['name']}" + (f" ב-{dd(first)}" if a.get("date") else " בימים הקרובים") + "."
+                return f"לא מצאתי זמן פנוי ל{COURSES[c]['name']}" + (f" ב-{dd(first)} ובימים שאחריו" if a.get("date") else " בימים הקרובים") + "."
             self.propose_extra("extra", c, f"📚 תרגול נוסף · {COURSES[c]['name']}", a.get("note") or "תרגול נוסף לבקשתך.",
-                               slots, f"תרגול נוסף ב{COURSES[c]['name']}, כמו שביקשת.", ref=P.iso(self.now)[:16])
+                               slots, why, ref=P.iso(self.now)[:16])
             return ""
         if act == "attendance":
             return "🙋 " + self.set_attendance(a.get("course"), a.get("date") or self.now.date().isoformat(), a.get("status"))
@@ -1480,6 +1485,8 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 - מילואים בימי לימודים: attendance reserve לכל שיעור באותו יום (מתוך lessons) וגם capacity עם max_sessions=0.
   מילואים בתקופת המבחנים (marathon.start ואילך) או טווח ימים: marathon_block.
 - ב-reply של שינוי אישי כתוב שנשלחה הצעה לאישור, לא שזה בוצע.
+- ב-reply אל תבטיח תוצאה ("הוספתי", "הזזתי", "אזיז"). כתוב בקצרה מה הבנת. הבוט מצרף אחרי התשובה שלך מה קרה בפועל
+  (לפעמים אין מקום, או שהכללים לא מאפשרים).
 - שאלות על מבחנים, נושאי השבוע לפי הסילבוס או היעדרויות: ענה מתוך exams_moed_a, syllabus_this_week ו-absences.
 - אתה לא מרצה ולא מסביר חומר. אם הוא שואל שאלה על לוח הזמנים, ענה מתוך ההקשר בלבד
   (lessons = שיעורים באוניברסיטה בשבוע הקרוב, sessions = סשני לימוד, personal_events = אירועים אישיים)."""
