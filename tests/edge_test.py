@@ -89,7 +89,7 @@ def run_until(env, end, step=5, answer_daily=True):
         tick(env)
         if answer_daily:   # עודד מסמן "הכול בוצע" בסיכום היומי, כמו ביום רגיל
             for m in tg.sent[n:]:
-                if m["text"].startswith("🌙"):
+                if m["text"].startswith(("🌙", "🗓 סמן")):
                     d = m["buttons"] and tg.find_button(m["id"], lambda tx, dt: dt.startswith("alldone"))
                     if d:
                         tg.press(m["id"], d)
@@ -160,6 +160,14 @@ def main():
                  datetime.fromisoformat(e["end"]["dateTime"]).astimezone(TZ)) for e in cal.cals[PERS].values()]
     sess = sessions_from_calendar(cal)
     audit([x for x in sess if x[0].date() >= date(2026, 10, 18)], uni.lessons, personal, "calendar")
+
+    print("\n== סשנים של שישי: נשאלים במוצ״ש ולא משובצים מחדש")
+    wk = [m for m in tg.sent if m["text"].startswith("🗓 סמן") and m["at"].date() == date(2026, 10, 24)]
+    check(len(wk) == 1 and wk[0]["at"].time() >= time(21, 0), "Saturday night asks about Friday's sessions")
+    fri = [x for x in json.loads(store.blob)["sessions"] if x["start"][:10] == "2026-10-30" and x.get("course")]
+    check(fri and all(x["status"] == "done" for x in fri), f"confirmed Friday sessions stay done ({[x['status'] for x in fri]})")
+    sun = next(m for m in tg.sent if m["text"].startswith("☀️") and m["at"].date() == date(2026, 10, 25))
+    check("לא מצאתי מקום" not in sun["text"], "no 'couldn't place' noise on Sunday about Friday")
 
     print("\n== שעון חורף (25.10)")
     for d in (date(2026, 10, 22), date(2026, 10, 25), date(2026, 10, 26)):

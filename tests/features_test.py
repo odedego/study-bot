@@ -85,7 +85,7 @@ def run_until(e, end, step=5, answer_daily=True):
         tick(e)
         if answer_daily:
             for m in tg.sent[n:]:
-                if m["text"].startswith("🌙") and m["buttons"]:
+                if m["text"].startswith(("🌙", "🗓 סמן")) and m["buttons"]:
                     d = tg.find_button(m["id"], lambda tx, dt: dt.startswith("alldone"))
                     if d:
                         tg.press(m["id"], d)

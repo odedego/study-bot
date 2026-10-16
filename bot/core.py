@@ -650,7 +650,22 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
         mid = self.tg.send("\n".join(lines), self.daily_buttons(today) or None)
         self.st["bot"]["msgs"][str(mid)] = {"type": "daily", "date": today.isoformat()}
 
+    def ask_weekend(self, today: date):
+        """אין סיכום יומי בשישי, אז במוצ״ש שואלים על סשנים של שישי/שבת שלא סומנו (אחרת בבוקר הם ישובצו מחדש)."""
+        keys = [x["key"] for x in sorted(self.st["sessions"], key=lambda x: x["start"])
+                if x.get("status") == "planned" and x.get("eventId") and x.get("course")
+                and (today - timedelta(days=1)).isoformat() <= x["start"][:10] <= today.isoformat()
+                and datetime.fromisoformat(x["end"]) < self.now]
+        if not keys:
+            return
+        self.st["bot"]["msgs"][f"daily:{today.isoformat()}"] = {"keys": keys}
+        idx = {x["key"]: x for x in self.st["sessions"]}
+        lines = ["🗓 סמן מה בוצע בסוף השבוע (מה שלא יסומן עד הבוקר ישובץ מחדש):"] + [self.sess_line(idx[k]) for k in keys]
+        mid = self.tg.send("\n".join(lines), self.daily_buttons(today))
+        self.st["bot"]["msgs"][str(mid)] = {"type": "daily", "date": today.isoformat()}
+
     def job_weekly(self, today: date):
+        self.ask_weekend(today)
         uni, personal, fc, changes = self.feed_and_adopt(today)
         ws = P.week_start(today)
         rep = P.week_report(ws, self.st, self.now)
