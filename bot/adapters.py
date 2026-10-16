@@ -13,15 +13,38 @@ import requests
 TIMEOUT = 30
 
 
+class Permanent(Exception):
+    """שגיאה שאין טעם לנסות שוב (4xx)."""
+
+
 def _retry(fn, tries=3, wait=3):
-    last = None
+    """מנסה שוב רק על תקלות רשת, 5xx ו-429. לא ישן אחרי הניסיון האחרון."""
     for i in range(tries):
         try:
             return fn()
-        except Exception as e:  # noqa: BLE001
-            last = e
+        except Permanent:
+            raise
+        except Exception:  # noqa: BLE001
+            if i == tries - 1:
+                raise
             time.sleep(wait * (i + 1))
-    raise last
+
+
+def _check(r, what):
+    if r.status_code == 429:
+        try:
+            time.sleep(min(30, int(r.json().get("parameters", {}).get("retry_after", 5))))
+        except Exception:  # noqa: BLE001
+            time.sleep(5)
+        raise RuntimeError(f"{what}: 429")
+    if 400 <= r.status_code < 500:
+        try:
+            reason = r.json().get("description") or r.json().get("error", {}).get("message", "")
+        except Exception:  # noqa: BLE001
+            reason = ""
+        raise Permanent(f"{what}: {r.status_code} {str(reason)[:120]}")
+    if r.status_code >= 500:
+        raise RuntimeError(f"{what}: {r.status_code}")
 
 
 # ---------------------------------------------------------------- Telegram
@@ -33,11 +56,9 @@ class Telegram:
     def _call(self, method: str, **params):
         def go():
             r = requests.post(f"{self.base}/{method}", json=params, timeout=TIMEOUT)
-            data = r.json()
-            if not data.get("ok"):
-                raise RuntimeError(f"telegram {method}: {data.get('description')}")
-            return data["result"]
-        return _retry(go)
+            _check(r, f"telegram {method}")
+            return r.json()["result"]
+        return _retry(go, tries=1 if method == "answerCallbackQuery" else 3)
 
     @staticmethod
     def _markup(buttons):
@@ -62,7 +83,7 @@ class Telegram:
             p["reply_markup"] = m
         try:
             self._call("editMessageText", **p)
-        except RuntimeError as e:
+        except Permanent as e:
             if "not modified" not in str(e):
                 raise
 
@@ -70,15 +91,15 @@ class Telegram:
         try:
             self._call("editMessageReplyMarkup", chat_id=self.chat_id, message_id=message_id,
                        reply_markup=self._markup(buttons) or {"inline_keyboard": []})
-        except RuntimeError as e:
+        except Permanent as e:
             if "not modified" not in str(e):
                 raise
 
     def answer(self, callback_id: str, text: str = ""):
         try:
             self._call("answerCallbackQuery", callback_query_id=callback_id, text=text[:190])
-        except RuntimeError:
-            pass  # קריאה ישנה מדי: לא חשוב
+        except Exception:  # noqa: BLE001
+            pass  # "query is too old" כשהבוט רץ כל כמה דקות: לא חשוב
 
 
 # ---------------------------------------------------------------- Google Calendar
@@ -98,10 +119,19 @@ class Calendar:
     def _req(self, method, url, **kw):
         def go():
             r = self.s.request(method, url, timeout=TIMEOUT, **kw)
-            if r.status_code >= 400:
-                raise RuntimeError(f"calendar {method} {r.status_code}: {r.text[:300]}")
+            _check(r, f"calendar {method}")
             return r.json() if r.text else {}
         return _retry(go)
+
+    def get(self, cal_id: str, event_id: str) -> dict | None:
+        """None אם האירוע נמחק באמת (404/410/cancelled)."""
+        try:
+            e = self._req("GET", f"{self.API}/calendars/{requests.utils.quote(cal_id)}/events/{event_id}")
+        except Permanent as ex:
+            if " 404" in str(ex) or " 410" in str(ex):
+                return None
+            raise
+        return None if e.get("status") == "cancelled" else e
 
     def list(self, cal_id: str, start_iso: str, end_iso: str) -> list[dict]:
         out, token = [], None
@@ -117,7 +147,13 @@ class Calendar:
                 return out
 
     def create(self, cal_id: str, body: dict) -> dict:
-        return self._req("POST", f"{self.API}/calendars/{requests.utils.quote(cal_id)}/events", json=body)
+        """עם id קבוע מראש: יצירה כפולה מחזירה 409, ואז זה נחשב הצלחה (בלי כפילויות)."""
+        try:
+            return self._req("POST", f"{self.API}/calendars/{requests.utils.quote(cal_id)}/events", json=body)
+        except Permanent as ex:
+            if " 409" in str(ex) and body.get("id"):
+                return {"id": body["id"], "duplicate": True}
+            raise
 
     def patch(self, cal_id: str, event_id: str, body: dict) -> dict:
         return self._req("PATCH", f"{self.API}/calendars/{requests.utils.quote(cal_id)}/events/{event_id}", json=body)
@@ -138,11 +174,11 @@ class Feed:
     def fetch(self) -> str:
         def go():
             r = requests.get(self.url, timeout=60, headers={"User-Agent": "Mozilla/5.0 study-bot"})
-            r.raise_for_status()
-            r.encoding = r.encoding or "utf-8"
-            if "BEGIN:VCALENDAR" not in r.text:
-                raise RuntimeError("הפיד לא החזיר יומן")
-            return r.text
+            _check(r, "feed")
+            text = r.content.decode("utf-8", errors="replace")
+            if "BEGIN:VCALENDAR" not in text:
+                raise Permanent("הפיד לא החזיר יומן")
+            return text
         return _retry(go)
 
 
@@ -158,7 +194,7 @@ class Upstash:
     def load(self) -> dict | None:
         def go():
             r = requests.post(self.url, headers=self.h, json=["GET", self.KEY], timeout=TIMEOUT)
-            r.raise_for_status()
+            _check(r, "upstash")
             return r.json().get("result")
         v = _retry(go)
         return json.loads(v) if v else None
@@ -168,7 +204,7 @@ class Upstash:
 
         def go():
             r = requests.post(self.url, headers=self.h, json=["SET", self.KEY, body], timeout=TIMEOUT)
-            r.raise_for_status()
+            _check(r, "upstash")
             # גיבוי מתגלגל: עותק לכל יום, נשמר 30 יום
             day = state.get("updated", "")[:10]
             if day:
@@ -204,6 +240,6 @@ class Claude:
                 "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
                 json={"model": self.model, "max_tokens": max_tokens, "system": system,
                       "messages": [{"role": "user", "content": user}]})
-            r.raise_for_status()
+            _check(r, "claude")
             return "".join(b.get("text", "") for b in r.json().get("content", []))
         return _retry(go, tries=2)

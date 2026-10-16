@@ -82,6 +82,7 @@ class FakeCalendar:
         self._id = itertools.count(1)
         self.fail_next_list = False
         self.calls = []
+        self.deleted = set()
 
     def add(self, cal, ev):
         self.cals.setdefault(cal, {})[ev["id"]] = copy.deepcopy(ev)
@@ -100,8 +101,15 @@ class FakeCalendar:
         evs = [copy.deepcopy(x) for x in self.cals.get(cal, {}).values() if a <= self._start(x) < b]
         return sorted(evs, key=self._start)
 
+    def get(self, cal, eid):
+        e = self.cals.get(cal, {}).get(eid)
+        return copy.deepcopy(e) if e else None
+
     def create(self, cal, body):
-        eid = f"ev{next(self._id)}"
+        eid = body.get("id") or f"ev{next(self._id)}"
+        if eid in self.cals.get(cal, {}) or eid in self.deleted:
+            self.calls.append(("dup", cal, body["summary"]))
+            return {"id": eid, "duplicate": True}
         ev = dict(copy.deepcopy(body), id=eid)
         self.add(cal, ev)
         self.calls.append(("create", cal, body["summary"]))
@@ -114,6 +122,7 @@ class FakeCalendar:
 
     def delete(self, cal, eid):
         self.cals.get(cal, {}).pop(eid, None)
+        self.deleted.add(eid)
 
 
 class FakeFeed:

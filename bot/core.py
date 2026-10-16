@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import base64
+import copy
 import hashlib
 import json
 import os
@@ -41,6 +43,11 @@ def sid(key: str) -> str:
 
 def dd(d: date) -> str:
     return f"{HEB_DAY[d.weekday()]} {d.day}.{d.month}"
+
+
+def event_id(key: str, suffix: str = "") -> str:
+    """id קבוע לאירוע לפי מפתח הסשן (base32hex, כמו ש-Google דורש). יצירה כפולה = 409 = אין כפילות."""
+    return "sb" + base64.b32hexencode(hashlib.sha1((key + suffix).encode()).digest()).decode().lower().rstrip("=")
 
 
 def strip_marks(title: str) -> str:
@@ -132,19 +139,23 @@ class Bot:
         except Exception as e:  # noqa: BLE001
             evs, self._feed_error = [], f"לא הצלחתי להוריד את פיד האוניברסיטה ({str(e)[:80]})"
         self._uni, self._raw = P.classify(evs), len(evs)
+        if evs and not self._uni.lessons and not self._feed_error:
+            self._feed_error = "הפיד הגיע, אבל לא זיהיתי בו אף שיעור (אולי בעיית קידוד)"
         return self._uni, self._raw
 
-    def load_personal(self, start: date, days: int = 16) -> list:
+    def load_personal(self, start: date | None = None) -> list:
+        """חלון קבוע ורחב (מתחילת השבוע הנוכחי, 3 שבועות קדימה), נטען פעם אחת בכל הרצה."""
         if getattr(self, "_personal", None) is not None:
             return self._personal
-        self._personal = []
+        self._personal, self._personal_error = [], None
         if self.personal_cal:
+            s0 = P.week_start(self.now.date())
             try:
-                data = self.cal.list(self.personal_cal, P.at(start, time(0, 0)).isoformat(),
-                                     P.at(start + timedelta(days=days), time(0, 0)).isoformat())
+                data = self.cal.list(self.personal_cal, P.at(s0, time(0, 0)).isoformat(),
+                                     P.at(s0 + timedelta(days=21), time(0, 0)).isoformat())
                 self._personal = self._events_from(data)
             except Exception as e:  # noqa: BLE001
-                self.warn_once("personal", f"⚠️ אין לי גישה ליומן האישי, אז אני משבץ בלי לראות אותו ({str(e)[:60]})")
+                self._personal_error = f"לא הצלחתי לקרוא את היומן האישי ({str(e)[:60]})"
         return self._personal
 
     def reviews(self, start: date, days: int) -> list[dict]:
@@ -169,8 +180,8 @@ class Bot:
         self.tg.send(text)
 
     # ------------------------------------------------------------ calendar writes
-    def create_event(self, s: dict) -> str:
-        body = {"summary": s["title"], "description": s.get("description") or f"מזהה: {s['key']}",
+    def create_event(self, s: dict, suffix: str = "") -> str:
+        body = {"id": event_id(s["key"], suffix), "summary": s["title"], "description": s.get("description") or f"מזהה: {s['key']}",
                 "start": {"dateTime": rfc(s["start"]), "timeZone": "Asia/Jerusalem"},
                 "end": {"dateTime": rfc(s["end"]), "timeZone": "Asia/Jerusalem"},
                 "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 10}]}}
@@ -196,6 +207,22 @@ class Bot:
     def sync_week(self, ws: date, uni, personal) -> dict:
         """תוכנית השבוע ← יומן החזרות. יוצר רק מה שחסר. לא מוחק ולא מזיז."""
         p = P._plan_for(ws, uni, personal, self.st)
+        known = {x["key"] for x in self.st["sessions"]}
+        count = sum(1 for x in self.st["sessions"] if x.get("kind") != "weekly" and x.get("status") in ("planned", "done", "missed")
+                    and ws.isoformat() <= x["start"][:10] < (ws + timedelta(days=7)).isoformat())
+        keep, capped, past = [], [], []
+        for x in p["sessions"]:
+            if x["key"] in known:
+                keep.append(x)
+            elif datetime.fromisoformat(x["start"]) <= self.now:
+                past.append(x)          # שיעור שהופיע באיחור ושובץ לזמן שעבר: לא נרשם
+            elif x["kind"] != "weekly" and count >= self.WEEKLY_CAP:
+                capped.append(x)        # תקרה שבועית
+            else:
+                keep.append(x)
+                count += 1 if x["kind"] != "weekly" else 0
+        p["sessions"] = keep
+        p["capped"] = capped
         existing = self.reviews(ws - timedelta(days=1), 9)
         self.guard_empty(existing, ws, ws + timedelta(days=7))
         d = P.diff(p, existing, self.now)
@@ -216,7 +243,8 @@ class Bot:
                 if not strip_marks(ex.get("summary", "")) == u["title"]:
                     self.cal.patch(self.reviews_cal, u["eventId"], {"summary": u["title"]})
         P.register_plan(self.st, p, ids)
-        self.st["archived_keys"] = sorted(set(self.st.get("archived_keys", [])) | {x["key"] for x in p["unplaced"]})
+        self.st["archived_keys"] = sorted(set(self.st.get("archived_keys", [])) | {x["key"] for x in p["unplaced"]}
+                                          | {x["key"] for x in capped + past})
         p["created"] = created
         return p
 
@@ -239,25 +267,42 @@ class Bot:
         return {**r, "rescheduled": keep, "not_placed": r["not_placed"] + extra}
 
     def restore(self, s: dict) -> str:
-        s["status"] = "planned"
+        d = datetime.fromisoformat(s["start"]).date()
+        for e in self.reviews(d, 1):
+            if f"מזהה: {s['key']}" in (e.get("description") or ""):
+                s.update(status="planned", eventId=e["id"])
+                s.pop("note", None)
+                return e["id"]
+        n = self.st["bot"].setdefault("restores", {}).get(s["key"], 0) + 1
+        self.st["bot"]["restores"][s["key"]] = n
+        eid = self.create_event(P._session_from_state(s).to_json(), suffix=f"r{n}")
+        s.update(status="planned", eventId=eid)
         s.pop("note", None)
-        eid = self.create_event(P._session_from_state(s).to_json())
-        s["eventId"] = eid
         return eid
 
     # ------------------------------------------------------------ feed + adopt (shared)
     def feed_and_adopt(self, today: date):
         uni, raw = self.load_uni()
         personal = self.load_personal(P.week_start(today))
-        fc = P.feed_check(uni, raw, self.st, today, self.now, True)
         if getattr(self, "_feed_error", None):
+            fc = {"ok": False, "block": True, "reasons": [self._feed_error], "stale": False, "first_run": False}
+        else:
+            fc = P.feed_check(uni, raw, self.st, today, self.now, True)
+        if getattr(self, "_personal_error", None):
             fc["block"] = True
-            fc["reasons"] = [self._feed_error] + fc["reasons"]
+            fc["reasons"] = fc["reasons"] + [self._personal_error]
         ov = P.lesson_overrides(uni, personal)
         fc["skipped"] = [dict(v, key=k) for k, v in ov["skipped"].items() if v["date"] >= today.isoformat()]
         fc["duplicates"] = [dict(v, key=k) for k, v in ov["duplicates"].items() if v["date"] >= today.isoformat()]
         rev = self.reviews(today - timedelta(days=7), 15)
         self.guard_empty(rev, today - timedelta(days=7), today + timedelta(days=8))
+        seen = {e["id"] for e in rev}
+        lo, hi = (today - timedelta(days=7)).isoformat(), (today + timedelta(days=8)).isoformat()
+        for x in self.st["sessions"]:
+            if x.get("eventId") and x["eventId"] not in seen and x.get("status") == "planned" and lo <= x["start"][:10] < hi:
+                e = self.cal.get(self.reviews_cal, x["eventId"])   # אולי הוזז רחוק, לא נמחק
+                if e:
+                    rev.append(e)
         changes = P.adopt_calendar(self.st, rev, P.at(today - timedelta(days=7), time(0, 0)),
                                    P.at(today + timedelta(days=8), time(0, 0)))
         return uni, personal, fc, changes
@@ -267,6 +312,8 @@ class Bot:
         if fc.get("stale"):
             out += [f"⚠️ {r}" for r in fc["reasons"]]
         if fc.get("first_run"):
+            return out
+        if fc.get("block"):
             return out
         for k in ("cancelled", "changed", "moved", "added", "vanished"):
             out += [f"• {x['text']}" for x in fc.get(k, [])]
@@ -289,22 +336,29 @@ class Bot:
                 cache = self.st["bot"].setdefault("recap_at", {})
                 if today.isoformat() not in cache:
                     uni, _ = self.load_uni()
-                    ls = [l for l in uni.lessons if l.day == today]
-                    cache.clear()
-                    cache[today.isoformat()] = P.iso(max(l.end for l in ls) + timedelta(minutes=P.CONFIG["recap_after_min"])) if ls else ""
-                r_iso = cache[today.isoformat()]
-                if not r_iso:
+                    if not getattr(self, "_feed_error", None):
+                        ls = [l for l in uni.lessons if l.day == today]
+                        cache.clear()
+                        cache[today.isoformat()] = P.iso(max(l.end for l in ls) + timedelta(minutes=P.CONFIG["recap_after_min"])) if ls else ""
+                r_iso = cache.get(today.isoformat())
+                if r_iso is None:
+                    pass                # הפיד לא זמין: ננסה בהרצה הבאה
+                elif not r_iso:
                     jobs_today[f"recap:{today.isoformat()}"] = jobs_today[f"recapr:{today.isoformat()}"] = "none"
                 else:
                     r = datetime.fromisoformat(r_iso)
                     out.append(("recap", r, 4))
-                    out.append(("recapr", r + timedelta(minutes=P.CONFIG["recap_reminder_after_min"]), 2))
+                    sent = self.st["bot"].setdefault("recap_sent", {}).get(today.isoformat())
+                    if sent:
+                        out.append(("recapr", max(r, datetime.fromisoformat(sent)) + timedelta(minutes=P.CONFIG["recap_reminder_after_min"]), 2))
         res = []
         for name, at, win in out:
             key = f"{name}:{today.isoformat()}"
             if self.st["bot"]["jobs"].get(key):
                 continue
             if self.now < at:
+                continue
+            if name == "recapr" and not self.st["bot"]["jobs"].get(f"recap:{today.isoformat()}"):
                 continue
             if self.now > at + timedelta(hours=win):
                 self.st["bot"]["jobs"][key] = "skipped"
@@ -315,14 +369,19 @@ class Bot:
 
     def run_jobs(self):
         for name, key in self.due_jobs():
+            snapshot = copy.deepcopy(self.st)
             try:
                 getattr(self, f"job_{name}")(self.now.date())
                 self.st["bot"]["jobs"][key] = "done"
                 self.st["runs"].append({"run": name, "at": P.iso(self.now), "ok": True, "notes": ""})
             except Exception as e:  # noqa: BLE001
+                # חוזרים למצב שלפני המשימה, כדי שההודעות לא יאבדו בניסיון הבא.
+                # היצירות ביומן בטוחות לחזרה: id קבוע = אין כפילויות.
+                self.st = snapshot
+                self._uni = self._personal = None
                 fails = self.st["bot"]["fails"]
                 fails[key] = fails.get(key, 0) + 1
-                self.log.append(traceback.format_exc())
+                self.log.append(f"{name}: {type(e).__name__}: {str(e)[:200]}")
                 self.st["runs"].append({"run": name, "at": P.iso(self.now), "ok": False, "notes": str(e)[:200]})
                 if fails[key] >= 3:
                     self.st["bot"]["jobs"][key] = "failed"
@@ -362,6 +421,7 @@ class Bot:
             not_placed = [f"• {x['title']}" for x in r["not_placed"]]
             p = self.sync_week(P.week_start(today), uni, personal)
             created = p["created"]
+            not_placed += [f"• {x['title']} (השבוע כבר מלא, 11 סשנים)" for x in p["capped"]]
         ex = P.exc_notify(today, uni, personal, self.st, True)
 
         ls, ss = self.lessons_lines(uni, today), self.sessions_on(today)
@@ -410,9 +470,13 @@ class Bot:
 
     def job_recap(self, today: date):
         uni, _ = self.load_uni()
+        if getattr(self, "_feed_error", None):
+            raise RuntimeError(self._feed_error)
         courses = sorted({l.course for l in uni.lessons if l.day == today}, key=P.COURSE_ORDER.index)
         if not courses:
             return
+        self.st["bot"].setdefault("recap_sent", {}).clear()
+        self.st["bot"]["recap_sent"][today.isoformat()] = P.iso(self.now)
         names = " · ".join(COURSES[c]["name"] for c in courses)
         text = (f"🚆 ריקאפ · {dd(today)}\n{names}\n\nכמה הבנת היום? 1 = לא הבנתי, 5 = שולט.\n\n"
                 "ואז כתוב לי בחופשיות: מה נלמד, מה לא היה ברור, מטלות חדשות (מה, עד מתי, כמה זמן), "
@@ -466,10 +530,12 @@ class Bot:
             lines += ["", "📈 השבוע: " + " · ".join(f"{n} {v['done']}/{v['planned']}" for n, v in prog.items())]
         t = rd["tomorrow"]
         tl = [f"• {l['start']}–{l['end']} {l['course']}" for l in t["lessons"]] + [f"• {s['start']} {s['title']}" for s in t["sessions"]]
+        if getattr(self, "_feed_error", None):
+            lines += ["", "⚠️ לא הצלחתי לקרוא את המערכת עכשיו, אז השיעורים של מחר אולי חסרים."]
         lines += ["", f"מחר · {t['day']} {date.fromisoformat(t['date']).day}.{date.fromisoformat(t['date']).month}:"] + (tl or ["• יום פנוי"])
         if rd["assignments_next_7_days"]:
             lines += ["", "📝 מטלות קרובות:"] + [f"• {COURSES.get(a['course'], {}).get('name', a['course'])}: {a['title']} עד {a['due']}" for a in rd["assignments_next_7_days"]]
-        openq = [q for q in rd["pending_questions"] if q.get("id") != "dup"]
+        openq = [q for q in rd["pending_questions"] if not str(q.get("id", "")).startswith(("dup", "cap-"))][-3:]
         if openq:
             lines += ["", "❔ פתוח:"] + [f"• {q['text']}" for q in openq[:3]]
         lines += ["", "אפשר לכתוב לי קיבולת למחר (\"מחר פנוי כל היום\" / \"מחר רק סשן אחד\")."]
@@ -503,8 +569,9 @@ class Bot:
             lines += ["", "⚠️ לא שיבצתי את השבוע הבא: " + "; ".join(fc["reasons"])]
         else:
             p = self.sync_week(nxt, uni, personal)
-            body = p["plan_text"] if "plan_text" in p else P.plan_text(p)
-            lines += ["", "🗓 השבוע הבא:"] + body.split("\n")[1:]
+            lines += ["", "🗓 השבוע הבא:"] + P.plan_text(p).split("\n")[1:]
+            if p["capped"]:
+                lines += ["השבוע מלא (11). לא שיבצתי: " + ", ".join(x["title"] for x in p["capped"])]
         ex = P.exc_notify(nxt, uni, personal, self.st, True)
         for x in ex["new"]:
             if x["type"] == "class_on_free_day":
@@ -522,16 +589,21 @@ class Bot:
     def handle_updates(self):
         b = self.st["bot"]
         ups = self.tg.get_updates(b["offset"])
-        for u in ups:
+        for i, u in enumerate(ups):
             b["offset"] = u["update_id"] + 1
+            if i and i % 5 == 0:
+                self.save_state()
             try:
                 if "callback_query" in u:
                     self.on_callback(u["callback_query"])
                 elif "message" in u and u["message"].get("text"):
                     self.on_text(u["message"])
             except Exception as e:  # noqa: BLE001
-                self.log.append(traceback.format_exc())
-                self.tg.send(f"⚠️ משהו נכשל בטיפול בהודעה: {str(e)[:150]}")
+                self.log.append(f"update: {type(e).__name__}: {str(e)[:200]}")
+                try:
+                    self.tg.send(f"⚠️ משהו נכשל בטיפול בהודעה: {str(e)[:150]}")
+                except Exception:  # noqa: BLE001
+                    pass
         if ups:
             self.save_state()
 
@@ -646,6 +718,8 @@ class Bot:
 
     def day_text(self, d: date) -> str:
         uni, _ = self.load_uni()
+        if getattr(self, "_feed_error", None):
+            return f"⚠️ {self._feed_error}"
         lines = [f"📅 {dd(d)}"] + self.lessons_lines(uni, d) + [self.sess_line(s) for s in self.sessions_on(d)]
         return "\n".join(lines) if len(lines) > 1 else f"📅 {dd(d)}: אין שיעורים ואין סשנים."
 
@@ -669,7 +743,12 @@ class Bot:
             self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": text})
             self.tg.send("רשמתי. (בלי מפתח Claude אני מבין רק כפתורים ופקודות: /today /tomorrow /week)")
             return
-        raw = self.llm.complete(LLM_SYSTEM, f"הקשר:\n{self.context_for_llm()}\n\nההודעה של עודד:\n{text}")
+        try:
+            raw = self.llm.complete(LLM_SYSTEM, f"הקשר:\n{self.context_for_llm()}\n\nההודעה של עודד:\n{text}")
+        except Exception:  # noqa: BLE001
+            self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": text})
+            self.tg.send("שמרתי את ההודעה, אבל לא הצלחתי לפענח אותה עכשיו. נסה שוב עוד מעט או השתמש בכפתורים.")
+            return
         m = re.search(r"\{.*\}", raw, re.S)
         try:
             plan = json.loads(m.group(0)) if m else {}
@@ -710,7 +789,10 @@ class Bot:
                 raise ValueError("קורס לא ידוע")
             due = a.get("due")
             date.fromisoformat(due) if due else None
-            x = {"id": f"{c}-{len(self.st['assignments']) + 1}", "course": c, "title": a.get("title", ""),
+            for y in self.st["assignments"]:
+                if y["course"] == c and y["title"] == a.get("title", "") and y.get("due") == due:
+                    return f"📝 המטלה כבר רשומה: {y['title']}"
+            x = {"id": f"{c}-{sid(c + a.get('title', '') + str(due))[:5]}", "course": c, "title": a.get("title", ""),
                  "due": due, "est_min": a.get("est_min"), "status": "open", "added": P.iso(self.now)}
             self.st["assignments"].append(x)
             return f"📝 מטלה: {COURSES[c]['name']} · {x['title']} עד {due or '?'}" + ("" if x["est_min"] else " (כמה זמן זה ייקח?)")
@@ -725,7 +807,7 @@ class Bot:
             if not s or s.get("status") != "planned":
                 raise ValueError("אפשר להזיז רק סשן מתוכנן")
             st0 = datetime.fromisoformat(a["start"])
-            st0 = st0.replace(tzinfo=TZ) if st0.tzinfo is None else st0
+            st0 = st0.replace(tzinfo=TZ) if st0.tzinfo is None else st0.astimezone(TZ)
             en = st0 + timedelta(minutes=P.CONFIG["session_min"])
             if en.time() > time(23, 0) or en.date() != st0.date():
                 if not a.get("late_ok"):
@@ -735,10 +817,10 @@ class Bot:
                      if st0 < b[1] and b[0] < en and b[2] == "lesson"]
             if clash:
                 raise ValueError("יש שיעור בזמן הזה")
-            s["start"], s["end"] = P.iso(st0), P.iso(en)
             if s.get("eventId"):
                 self.cal.patch(self.reviews_cal, s["eventId"], {"start": {"dateTime": st0.isoformat(), "timeZone": "Asia/Jerusalem"},
                                                                "end": {"dateTime": en.isoformat(), "timeZone": "Asia/Jerusalem"}})
+            s["start"], s["end"] = P.iso(st0), P.iso(en)
             return f"↔️ {strip_marks(P._session_from_state(s).title())} → {dd(st0.date())} {P.fmt_t(st0)}"
         if act == "restore":
             s = self.by_short(a.get("id", ""))
@@ -748,7 +830,7 @@ class Bot:
             return f"↩️ הוחזר: {strip_marks(P._session_from_state(s).title())}"
         if act == "capacity":
             self.st["pending_questions"].append({"id": f"cap-{a.get('date', '')}", "text": f"קיבולת {a.get('date', '')}: {a.get('text', '')}", "asked": P.iso(self.now)})
-            return "📌 רשמתי את הקיבולת"
+            return "📌 רשמתי. בינתיים אני לא מסדר את השבוע מחדש לבד לפי זה: תגיד לי מה להזיז, ואזיז."
         if act == "note":
             self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": a.get("text", "")})
             return ""
