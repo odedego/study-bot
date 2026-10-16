@@ -3,7 +3,9 @@
 שהגיע זמנן (בוקר, ריקאפ, סקירה יומית, סקירה שבועית). כל חישובי השיבוץ ב-planner.py.
 
 כללי ברזל (ממסמך האפיון):
-  - כותבים רק ליומן "חזרות לימודים". היומן האישי ויומן האוניברסיטה לקריאה בלבד.
+  - כותבים רק ליומן "חזרות לימודים". יומן האוניברסיטה לקריאה בלבד.
+  - היומן האישי: שינוי/מחיקה/הוספה רק אחרי לחיצה של עודד על "אשר" על הצעה ספציפית.
+    נאכף ב-_GuardedCal: כל כתיבה ליומן שאינו יומן החזרות נחסמת, חוץ מתוך exec_personal.
   - כשל בסנכרון אינו "אין שינוי": פיד חשוד = לא משבצים, רק מתריעים.
   - מחיקה של עודד ביומן היא החלטה: מודיעים ולא יוצרים מחדש, אלא אם ביקש.
   - אין לימוד אחרי 23:00 אלא בבקשה מפורשת.
@@ -66,9 +68,44 @@ def rfc(iso_str: str) -> str:
     return datetime.fromisoformat(iso_str).astimezone(TZ).isoformat()
 
 
+class _GuardedCal:
+    """עוטף את היומן: כתיבה לכל יומן חוץ מיומן החזרות נזרקת, אלא אם עודד אישר את הפעולה הספציפית."""
+    def __init__(self, cal, bot):
+        self._cal, self._bot = cal, bot
+
+    def __getattr__(self, name):
+        return getattr(self._cal, name)
+
+    def _ok(self, cal_id):
+        if cal_id != self._bot.reviews_cal and not self._bot._approved:
+            raise PermissionError("כתיבה ליומן האישי בלי אישור מפורש חסומה")
+
+    def create(self, cal_id, body):
+        self._ok(cal_id)
+        return self._cal.create(cal_id, body)
+
+    def patch(self, cal_id, event_id, body):
+        self._ok(cal_id)
+        return self._cal.patch(cal_id, event_id, body)
+
+    def delete(self, cal_id, event_id):
+        self._ok(cal_id)
+        return self._cal.delete(cal_id, event_id)
+
+
+PP_TTL_H = 24  # הצעה לשינוי ביומן האישי פגה אחרי יממה
+
+
+def parse_local(v: str) -> datetime:
+    x = datetime.fromisoformat(v)
+    return x.replace(tzinfo=TZ) if x.tzinfo is None else x.astimezone(TZ)
+
+
 class Bot:
     def __init__(self, tg, cal, feed, store, llm, cfg: dict, now_fn=None):
-        self.tg, self.cal, self.feed, self.store, self.llm = tg, cal, feed, store, llm
+        self.tg, self.feed, self.store, self.llm = tg, feed, store, llm
+        self._approved = False
+        self.cal = _GuardedCal(cal, self)
         self.reviews_cal = cfg["REVIEWS_CAL"]
         self.personal_cal = cfg.get("PERSONAL_CAL", "")
         self.now_fn = now_fn or (lambda: datetime.now(TZ))
@@ -87,7 +124,7 @@ class Bot:
         base.setdefault("bot", {})
         b = base["bot"]
         for k, v in {"offset": 0, "jobs": {}, "ids": {}, "msgs": {}, "pending": None, "fails": {},
-                     "notes": [], "durations": {}, "warned": {}}.items():
+                     "notes": [], "durations": {}, "warned": {}, "pp": {}, "pids": {}}.items():
             b.setdefault(k, v)
         self.st = base
 
@@ -100,6 +137,9 @@ class Bot:
         live = {s["key"] for s in self.st["sessions"]}
         b["ids"] = {k: v for k, v in b["ids"].items() if v in live}
         b["notes"] = b["notes"][-50:]
+        old = P.iso(self.now - timedelta(days=7))
+        b["pp"] = {k: v for k, v in b["pp"].items() if v.get("at", "") >= old}
+        b["pids"] = dict(list(b["pids"].items())[-200:])
         self.st["updated"] = P.iso(self.now)
         self.st["planner_version"] = P.VERSION
         self.st.pop("checksum", None)
@@ -663,6 +703,9 @@ class Bot:
             _, c, v = parts
             self.st["course_kind"][c] = v
             reply = f"{COURSES[c]['name']}: {'מצטבר' if v == 'cumulative' else 'רענון'}"
+        elif kind == "pp":
+            _, act, pid = parts
+            reply = self.exec_personal(pid) if act == "ok" else self.cancel_personal(pid)
         elif kind == "restore":
             s = self.by_short(parts[1])
             if s and s.get("status") == "dropped":
@@ -736,6 +779,7 @@ class Bot:
         return json.dumps({"now": P.iso(self.now), "today": f"{HEB_DAY[today.weekday()]} {today.isoformat()}",
                            "courses": {k: v["name"] for k, v in COURSES.items()},
                            "sessions": sess, "recap_context": pend,
+                           "personal_events": self.personal_for_llm(),
                            "open_assignments": [a for a in self.st["assignments"] if a.get("status") != "done"]},
                           ensure_ascii=False)
 
@@ -832,10 +876,139 @@ class Bot:
         if act == "capacity":
             self.st["pending_questions"].append({"id": f"cap-{a.get('date', '')}", "text": f"קיבולת {a.get('date', '')}: {a.get('text', '')}", "asked": P.iso(self.now)})
             return "📌 רשמתי. בינתיים אני לא מסדר את השבוע מחדש לבד לפי זה: תגיד לי מה להזיז, ואזיז."
+        if act == "personal":
+            return self.propose_personal(a)
         if act == "note":
             self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": a.get("text", "")})
             return ""
         return ""
+
+    # ------------------------------------------------------------ personal calendar (רק באישור)
+    def personal_raw(self) -> list[dict]:
+        if getattr(self, "_pers_raw", None) is None:
+            self._pers_raw = []
+            if self.personal_cal:
+                s0 = self.now - timedelta(hours=2)
+                try:
+                    self._pers_raw = self.cal.list(self.personal_cal, s0.isoformat(), (s0 + timedelta(days=14)).isoformat())
+                except Exception as e:  # noqa: BLE001
+                    self.log.append(f"personal_raw: {e}")
+        return self._pers_raw
+
+    def personal_for_llm(self) -> list[dict]:
+        out = []
+        for e in self.personal_raw()[:80]:
+            pid = "p" + sid(e["id"])[:7]
+            self.st["bot"]["pids"][pid] = e["id"]
+            st, en = e.get("start", {}), e.get("end", {})
+            out.append({"id": pid, "title": e.get("summary", ""), "start": (st.get("dateTime") or st.get("date", ""))[:16],
+                        "end": (en.get("dateTime") or en.get("date", ""))[:16], "all_day": "date" in st})
+        return out
+
+    def _pp_text(self, p: dict) -> str:
+        def span(a, b):
+            x, y = datetime.fromisoformat(a), datetime.fromisoformat(b)
+            return f"{dd(x.date())} {P.fmt_t(x)}–{P.fmt_t(y)}"
+        if p["op"] == "move":
+            body = f"להזיז את «{p['title']}»\nמ: {span(p['old_start'], p['old_end'])}\nל: {span(p['new_start'], p['new_end'])}"
+        elif p["op"] == "delete":
+            body = f"למחוק את «{p['title']}» ({span(p['old_start'], p['old_end'])})"
+        else:
+            body = f"להוסיף «{p['title']}» ב-{span(p['new_start'], p['new_end'])}"
+        if p.get("recurring"):
+            body += "\n(אירוע חוזר: רק המופע הזה)"
+        return "🗓️ שינוי ביומן האישי שלך, מחכה לאישור:\n" + body
+
+    def propose_personal(self, a: dict) -> str:
+        """לא נוגע ביומן. רק שולח הצעה עם כפתור אישור."""
+        op = a.get("op")
+        if op not in ("move", "delete", "create"):
+            raise ValueError("פעולה לא מוכרת")
+        if not self.personal_cal:
+            raise ValueError("היומן האישי לא מחובר")
+        p = {"op": op, "at": P.iso(self.now), "state": "pending"}
+        if op in ("move", "delete"):
+            eid = self.st["bot"]["pids"].get(a.get("event", ""))
+            ev = self.cal.get(self.personal_cal, eid) if eid else None
+            if not ev:
+                raise ValueError("לא מצאתי את האירוע ביומן האישי")
+            if "dateTime" not in ev.get("start", {}):
+                raise ValueError("זה אירוע של יום שלם. אותו עדיף שתשנה בעצמך")
+            p.update(event=eid, etag=ev.get("etag", ""), title=ev.get("summary", "(ללא שם)"),
+                     old_start=P.iso(parse_local(ev["start"]["dateTime"])), old_end=P.iso(parse_local(ev["end"]["dateTime"])),
+                     recurring=bool(ev.get("recurringEventId")))
+        if op in ("move", "create"):
+            st0 = parse_local(a["start"])
+            if op == "move":
+                dur = datetime.fromisoformat(p["old_end"]) - datetime.fromisoformat(p["old_start"])
+            else:
+                dur = timedelta(minutes=60)
+                p["title"] = (a.get("title") or "").strip()
+                if not p["title"]:
+                    raise ValueError("חסר שם לאירוע")
+            en = parse_local(a["end"]) if a.get("end") else st0 + dur
+            if en <= st0:
+                raise ValueError("שעת הסיום לפני שעת ההתחלה")
+            if st0 < self.now - timedelta(minutes=5):
+                raise ValueError("הזמן הזה כבר עבר")
+            p.update(new_start=P.iso(st0), new_end=P.iso(en))
+        pid = sid(json.dumps(p, sort_keys=True, ensure_ascii=False))[:8]
+        p["mid"] = self.tg.send(self._pp_text(p), [[("✅ אשר", f"pp|ok|{pid}"), ("✖️ בטל", f"pp|no|{pid}")]])
+        self.st["bot"]["pp"][pid] = p
+        return ""
+
+    def cancel_personal(self, pid: str) -> str:
+        p = self.st["bot"]["pp"].get(pid)
+        if not p or p["state"] != "pending":
+            return "ההצעה כבר טופלה"
+        p["state"] = "cancelled"
+        self.tg.edit(p["mid"], self._pp_text(p) + "\n\n✖️ בוטל. לא נגעתי ביומן.")
+        return "בוטל"
+
+    def exec_personal(self, pid: str) -> str:
+        """הדרך היחידה לכתוב ליומן האישי: אחרי לחיצה על אשר, ורק אם האירוע לא השתנה מאז ההצעה."""
+        p = self.st["bot"]["pp"].get(pid)
+        if not p or p["state"] != "pending":
+            return "ההצעה כבר טופלה"
+        head = self._pp_text(p) + "\n\n"
+        if self.now - datetime.fromisoformat(p["at"]) > timedelta(hours=PP_TTL_H):
+            p["state"] = "expired"
+            self.tg.edit(p["mid"], head + "⌛ פג תוקף (עברה יממה). לא נגעתי ביומן. בקש שוב אם עדיין רלוונטי.")
+            return "פג תוקף"
+        tz = "Asia/Jerusalem"
+        try:
+            if p["op"] in ("move", "delete"):
+                ev = self.cal.get(self.personal_cal, p["event"])
+                if not ev:
+                    p["state"] = "gone"
+                    self.tg.edit(p["mid"], head + "האירוע כבר לא קיים ביומן. לא עשיתי כלום.")
+                    return "האירוע כבר לא קיים"
+                if ev.get("etag", "") != p["etag"]:
+                    p["state"] = "stale"
+                    self.tg.edit(p["mid"], head + "⚠️ האירוע השתנה מאז ההצעה, אז לא נגעתי בו. בקש שוב.")
+                    return "האירוע השתנה, לא בוצע"
+            self._approved = True
+            try:
+                if p["op"] == "move":
+                    self.cal.patch(self.personal_cal, p["event"], {"start": {"dateTime": rfc(p["new_start"]), "timeZone": tz},
+                                                                   "end": {"dateTime": rfc(p["new_end"]), "timeZone": tz}})
+                elif p["op"] == "delete":
+                    self.cal.delete(self.personal_cal, p["event"])
+                else:
+                    self.cal.create(self.personal_cal, {"id": event_id("pp" + pid), "summary": p["title"],
+                                                        "start": {"dateTime": rfc(p["new_start"]), "timeZone": tz},
+                                                        "end": {"dateTime": rfc(p["new_end"]), "timeZone": tz}})
+            finally:
+                self._approved = False
+        except Exception as e:  # noqa: BLE001
+            self.tg.edit(p["mid"], head + f"⚠️ נכשל: {str(e)[:120]}. אפשר ללחוץ אשר שוב.",
+                         [[("✅ אשר", f"pp|ok|{pid}"), ("✖️ בטל", f"pp|no|{pid}")]])
+            return "נכשל"
+        p["state"] = "done"
+        self._personal = self._pers_raw = None  # שהשיבוץ הבא יראה את המצב החדש
+        self.tg.edit(p["mid"], head + "✅ בוצע ביומן האישי.")
+        self.log.append(f"personal {p['op']} approved {pid}")
+        return "✅ בוצע"
 
 
 HELP = """אני בוט הלימודים שלך 📚
@@ -845,7 +1018,10 @@ HELP = """אני בוט הלימודים שלך 📚
 • מוצ״ש 21:00: סיכום שבוע ותוכנית לשבוע הבא.
 
 פקודות: היום · מחר · שבוע
-אפשר לכתוב חופשי, למשל: "עשיתי את מתמטיקה", "תזיז את כלכלה של מחר ל-10:00", "מטלה באקסל עד 5.11, שעתיים"."""
+אפשר לכתוב חופשי, למשל: "עשיתי את מתמטיקה", "תזיז את כלכלה של מחר ל-10:00", "מטלה באקסל עד 5.11, שעתיים".
+
+היומן האישי: אפשר לבקש "תזיז את הרופא של רביעי ל-12:00" או "תבטל את האימון מחר".
+אני אף פעם לא משנה אותו לבד: אני שולח הצעה, ומבצע רק אחרי שתלחץ ✅ אשר."""
 
 LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטודנט בשם עודד. אתה מקבל הקשר (JSON) והודעה חופשית ממנו,
 ומחזיר JSON בלבד, בלי טקסט מסביב:
@@ -861,9 +1037,14 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 {"action":"restore","id":"..."}         להחזיר סשן שנמחק (status=dropped)
 {"action":"capacity","date":"YYYY-MM-DD","text":"מה אמר על הזמן הפנוי"}
 {"action":"note","text":"..."}           כל מידע אחר שכדאי לזכור
+{"action":"personal","op":"move|delete|create","event":"id מתוך personal_events (ל-move/delete)","start":"YYYY-MM-DDTHH:MM","end":"YYYY-MM-DDTHH:MM או null","title":"רק ל-create"}
+    שינוי ביומן האישי. זו רק הצעה: עודד יקבל כפתור אישור. השתמש בזה רק כשעודד ביקש במפורש לשנות/לבטל/להוסיף אירוע אישי,
+    אף פעם ביוזמתך. ב-move בלי end נשמר אותו משך. אם לא ברור לאיזה אירוע הוא מתכוון, שאל ב-reply.
 
 כללים:
 - אם recap_context פעיל ועודד מתאר שיעורים, צור recap לכל קורס שהזכיר, בתאריך של recap_context.
 - תאריכים יחסיים ("מחר", "ביום רביעי") מחשבים מ-now.
 - אם משהו לא ברור, אל תנחש פעולה: שאל ב-reply ו-actions ריק.
+- סשני לימוד (sessions) מזיזים עם move. אירועים אישיים (personal_events) רק עם personal.
+- ב-reply של שינוי אישי כתוב שנשלחה הצעה לאישור, לא שזה בוצע.
 - אתה לא מרצה ולא מסביר חומר. אם הוא שואל שאלה על לוח הזמנים, ענה מתוך ההקשר בלבד."""

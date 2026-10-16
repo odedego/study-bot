@@ -117,6 +117,7 @@ class FakeCalendar:
 
     def patch(self, cal, eid, body):
         self.cals[cal][eid].update(copy.deepcopy(body))
+        self.cals[cal][eid]["etag"] = str(int(self.cals[cal][eid].get("etag", "0")) + 1)
         self.calls.append(("patch", cal, eid))
         return self.cals[cal][eid]
 
