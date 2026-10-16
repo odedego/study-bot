@@ -31,6 +31,10 @@ HEB_DAY = P.HEB_DAY
 COURSES = P.COURSES
 MARKS = ("✅", "❌", "↪️")
 
+# מגבלת היעדרויות לא מוצדקות לפי הסילבוסים (סמסטר א' תשפ"ז). 0 = חובה להגיע לכל מפגש. חסר = לא ידוע.
+ATTEND_LIMIT = {"math": 3, "econ": 4, "intro": 4, "mgmt": 0}
+ATT_LABEL = {"present": "הייתי", "absent": "לא הייתי", "reserve": "מילואים"}
+
 JOBS = {
     # שם: (ימים בשבוע לפי weekday של פייתון, שעה, חלון ריצה בשעות)
     "morning": ([P.SUN, P.MON, P.TUE, P.WED, P.THU, P.FRI], "07:44", 6),
@@ -124,7 +128,7 @@ class Bot:
         base.setdefault("bot", {})
         b = base["bot"]
         for k, v in {"offset": 0, "jobs": {}, "ids": {}, "msgs": {}, "pending": None, "fails": {},
-                     "notes": [], "durations": {}, "warned": {}, "pp": {}, "pids": {}}.items():
+                     "notes": [], "durations": {}, "warned": {}, "pp": {}, "pids": {}, "attend": {}}.items():
             b.setdefault(k, v)
         self.st = base
 
@@ -505,6 +509,9 @@ class Bot:
             for n in range(1, 6):
                 row.append((f"•{n}•" if rated.get(c) == n else str(n), f"rate|{c}|{d.isoformat()}|{n}"))
             rows.append(row)
+            cur = self.st["bot"]["attend"].get(f"{c}|{d.isoformat()}")
+            rows.append([((("•" if cur == v else "") + lab + ("•" if cur == v else "")), f"att|{c}|{d.isoformat()}|{v}")
+                         for lab, v in (("🙋 הייתי", "present"), ("🚫 לא הייתי", "absent"), ("🎖️ מילואים", "reserve"))])
         rows.append([("✅ הכול ברור (5 לכולם)", f"rateall|{d.isoformat()}")])
         return rows
 
@@ -599,6 +606,8 @@ class Bot:
             lines.append("עוד אין נתונים לשבוע הזה.")
         if rep["suggest_lighter_load"]:
             lines += ["", "שבועיים ברצף מתחת ל-70%. רוצה שאוריד קצת עומס בשבוע הבא?"]
+        if self.st["bot"]["attend"]:
+            lines += ["", self.attendance_text()]
         if rep["weak_topics"]:
             lines += ["", "🔍 חלש השבוע:"] + [f"• {w['course']}: {w.get('unclear') or w.get('topics') or ''} ({w.get('rating') or '?'}/5)" for w in rep["weak_topics"][:5]]
         fl = self.feed_lines(fc)
@@ -664,6 +673,7 @@ class Bot:
         if kind == "rate":
             _, c, d, n = parts
             self.add_recap(d, c, rating=int(n))
+            self.st["bot"]["attend"].setdefault(f"{c}|{d}", "present")
             reply = f"נרשם: {COURSES[c]['name']} {n}/5"
             meta = self.st["bot"]["msgs"].get(str(mid), {})
             self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [c])))
@@ -704,6 +714,12 @@ class Bot:
             _, c, v = parts
             self.st["course_kind"][c] = v
             reply = f"{COURSES[c]['name']}: {'מצטבר' if v == 'cumulative' else 'רענון'}"
+        elif kind == "att":
+            _, c, d, v = parts
+            reply = self.set_attendance(c, d, v)
+            meta = self.st["bot"]["msgs"].get(str(mid), {})
+            if meta.get("type") == "recap":
+                self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [c])))
         elif kind == "pp":
             _, act, pid = parts
             reply = self.exec_personal(pid) if act == "ok" else self.cancel_personal(pid)
@@ -753,6 +769,9 @@ class Bot:
             return
         if cmd in ("/tomorrow", "מחר"):
             self.tg.send(self.day_text(today + timedelta(days=1)))
+            return
+        if cmd in ("/absences", "היעדרויות", "נוכחות"):
+            self.tg.send(self.attendance_text())
             return
         if cmd in ("/week", "שבוע"):
             uni, _ = self.load_uni()
@@ -877,12 +896,54 @@ class Bot:
         if act == "capacity":
             self.st["pending_questions"].append({"id": f"cap-{a.get('date', '')}", "text": f"קיבולת {a.get('date', '')}: {a.get('text', '')}", "asked": P.iso(self.now)})
             return "📌 רשמתי. בינתיים אני לא מסדר את השבוע מחדש לבד לפי זה: תגיד לי מה להזיז, ואזיז."
+        if act == "attendance":
+            return "🙋 " + self.set_attendance(a.get("course"), a.get("date") or self.now.date().isoformat(), a.get("status"))
         if act == "personal":
             return self.propose_personal(a)
         if act == "note":
             self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": a.get("text", "")})
             return ""
         return ""
+
+    # ------------------------------------------------------------ attendance
+    def absences(self, c: str) -> int:
+        return sum(1 for k, v in self.st["bot"]["attend"].items() if k.startswith(c + "|") and v == "absent")
+
+    def att_status(self, c: str) -> str:
+        n, lim = self.absences(c), ATTEND_LIMIT.get(c)
+        res = sum(1 for k, v in self.st["bot"]["attend"].items() if k.startswith(c + "|") and v == "reserve")
+        extra = f" (+{res} מילואים)" if res else ""
+        if lim is None:
+            return f"{COURSES[c]['name']}: {n} היעדרויות{extra}"
+        if lim == 0:
+            return f"{COURSES[c]['name']}: {n} היעדרויות, חובה להגיע לכל מפגש{extra}"
+        return f"{COURSES[c]['name']}: {n}/{lim}{extra}"
+
+    def set_attendance(self, c: str, d: str, v: str) -> str:
+        if c not in COURSES or v not in ATT_LABEL:
+            raise ValueError("קורס או סטטוס לא מוכרים")
+        date.fromisoformat(d)
+        key = f"{c}|{d}"
+        self.st["bot"]["attend"][key] = v
+        msg = f"נרשם: {COURSES[c]['name']} · {ATT_LABEL[v]}"
+        if v == "reserve":
+            return msg + ". לא נספר כהיעדרות, אבל צריך להודיע בכתב למנהל הסטודנטים עד שבוע"
+        if v == "absent":
+            lim, n = ATTEND_LIMIT.get(c), self.absences(c)
+            if lim is not None and n > lim:
+                self.tg.send(f"🚨 {COURSES[c]['name']}: עברת את מגבלת ההיעדרויות ({n} מתוך {lim} מותרות). לפי הסילבוס זה חוסם גישה למבחן. כדאי לפנות לצוות הקורס או למנהל הסטודנטים.")
+            elif lim is not None and n == lim:
+                self.tg.send(f"⚠️ {COURSES[c]['name']}: זו ההיעדרות האחרונה המותרת ({n}/{lim}). עוד אחת וחסום המבחן.")
+            elif lim is None:
+                self.tg.send(f"{COURSES[c]['name']}: נרשמה היעדרות ({n}). אין לי עדיין את מגבלת הקורס מהסילבוס.")
+            return msg + f" ({n}" + (f"/{lim})" if lim is not None else ")")
+        return msg
+
+    def attendance_text(self) -> str:
+        lines = ["🙋 נוכחות בסמסטר"]
+        for c in P.COURSE_ORDER:
+            lines.append(self.att_status(c))
+        return "\n".join(lines)
 
     # ------------------------------------------------------------ personal calendar (רק באישור)
     def personal_raw(self) -> list[dict]:
@@ -1018,7 +1079,8 @@ HELP = """אני בוט הלימודים שלך 📚
 • 21:30: מה בוצע היום, ומה מחר.
 • מוצ״ש 21:00: סיכום שבוע ותוכנית לשבוע הבא.
 
-פקודות: היום · מחר · שבוע
+פקודות: היום · מחר · שבוע · היעדרויות
+בריקאפ יש גם כפתורי נוכחות (הייתי / לא הייתי / מילואים), ואני סופר היעדרויות מול המגבלה בכל קורס.
 אפשר לכתוב חופשי, למשל: "עשיתי את מתמטיקה", "תזיז את כלכלה של מחר ל-10:00", "מטלה באקסל עד 5.11, שעתיים".
 
 היומן האישי: אפשר לבקש "תזיז את הרופא של רביעי ל-12:00" או "תבטל את האימון מחר".
@@ -1037,6 +1099,7 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 {"action":"move","id":"...","start":"YYYY-MM-DDTHH:MM","late_ok":false}   late_ok=true רק אם עודד ביקש במפורש ללמוד אחרי 23:00
 {"action":"restore","id":"..."}         להחזיר סשן שנמחק (status=dropped)
 {"action":"capacity","date":"YYYY-MM-DD","text":"מה אמר על הזמן הפנוי"}
+{"action":"attendance","course":"...","date":"YYYY-MM-DD","status":"present|absent|reserve"}   נוכחות בשיעור. absent = לא הגיע. reserve = מילואים (לא נספר כהיעדרות)
 {"action":"note","text":"..."}           כל מידע אחר שכדאי לזכור
 {"action":"personal","op":"move|delete|create","event":"id מתוך personal_events (ל-move/delete)","start":"YYYY-MM-DDTHH:MM","end":"YYYY-MM-DDTHH:MM או null","title":"רק ל-create"}
     שינוי ביומן האישי. זו רק הצעה: עודד יקבל כפתור אישור. השתמש בזה רק כשעודד ביקש במפורש לשנות/לבטל/להוסיף אירוע אישי,
