@@ -25,14 +25,14 @@ from datetime import date, datetime, time, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import planner as P  # noqa: E402
+from bot import semester as SEM  # noqa: E402
 
 TZ = P.TZ
 HEB_DAY = P.HEB_DAY
 COURSES = P.COURSES
 MARKS = ("✅", "❌", "↪️")
 
-# מגבלת היעדרויות לא מוצדקות לפי הסילבוסים (סמסטר א' תשפ"ז). 0 = חובה להגיע לכל מפגש. חסר = לא ידוע.
-ATTEND_LIMIT = {"math": 3, "econ": 4, "intro": 4, "mgmt": 0}
+ATTEND_LIMIT = SEM.ATTEND_LIMIT
 ATT_LABEL = {"present": "הייתי", "absent": "לא הייתי", "reserve": "מילואים"}
 
 JOBS = {
@@ -128,9 +128,21 @@ class Bot:
         base.setdefault("bot", {})
         b = base["bot"]
         for k, v in {"offset": 0, "jobs": {}, "ids": {}, "msgs": {}, "pending": None, "fails": {},
-                     "notes": [], "durations": {}, "warned": {}, "pp": {}, "pids": {}, "attend": {}}.items():
+                     "notes": [], "durations": {}, "warned": {}, "pp": {}, "pids": {}, "attend": {}, "seeded": []}.items():
             b.setdefault(k, v)
         self.st = base
+        self.seed_deadlines()
+
+    def seed_deadlines(self):
+        """מועדי הגשה מהסילבוס נכנסים לרשימת המטלות פעם אחת (גם אם סימנת אותן כגמורות, לא חוזרות)."""
+        b = self.st["bot"]
+        for d in SEM.DEADLINES:
+            if d["id"] in b["seeded"]:
+                continue
+            if not any(a.get("id") == d["id"] for a in self.st["assignments"]):
+                self.st["assignments"].append({"id": d["id"], "course": d["course"], "title": d["title"], "due": d["due"],
+                                               "est_min": None, "status": "open", "added": P.iso(self.now), "source": "syllabus"})
+            b["seeded"].append(d["id"])
 
     def save_state(self):
         P.compact_state(self.st, self.now)
@@ -474,6 +486,14 @@ class Bot:
             lines += ls + [self.sess_line(s) for s in ss]
         else:
             lines.append("היום אין שיעורים ואין סשנים.")
+        today_courses = {l.course for l in uni.lessons if l.day == today}
+        syl = self.syllabus_lines(P.week_start(today), today_courses)
+        if syl:
+            lines += ["", "📖 לפי הסילבוס השבוע:"] + syl
+        soon = [x for x in SEM.upcoming_exams(today) if x[2] <= SEM.MORNING_COUNTDOWN_DAYS]
+        if soon:
+            c, dt, n = soon[0]
+            lines += ["", ("🍀 בהצלחה! " if n == 0 else "⏳ ") + self.exam_line(c, dt, n)]
         fl = self.feed_lines(fc)
         if fl:
             lines += ["", "🔄 שינויים במערכת:"] + fl
@@ -608,6 +628,17 @@ class Bot:
             lines += ["", "שבועיים ברצף מתחת ל-70%. רוצה שאוריד קצת עומס בשבוע הבא?"]
         if self.st["bot"]["attend"]:
             lines += ["", self.attendance_text()]
+        syl = self.syllabus_lines(P.week_start(nxt))
+        if syl:
+            lines += ["", "📖 בשבוע הבא לפי הסילבוס:"] + syl
+        up = SEM.upcoming_exams(today)
+        if up:
+            c, dt, n = up[0]
+            lines += ["", "⏳ המבחן הקרוב: " + self.exam_line(c, dt, n)]
+            if n <= SEM.PREP_NOTICE_DAYS and "prep-notice" not in self.st["bot"]["seeded"]:
+                self.st["bot"]["seeded"].append("prep-notice")
+                lines += ["🎯 נשארו פחות מ-6 שבועות למבחן הראשון. זה הזמן לתכנן עם Claude את תקופת ההכנה למבחנים (סדר, ימי חזרה, מבחני תרגול). "
+                          "עד אז אני ממשיך כרגיל. כתוב \"מבחנים\" ללוח המלא."]
         if rep["weak_topics"]:
             lines += ["", "🔍 חלש השבוע:"] + [f"• {w['course']}: {w.get('unclear') or w.get('topics') or ''} ({w.get('rating') or '?'}/5)" for w in rep["weak_topics"][:5]]
         fl = self.feed_lines(fc)
@@ -770,6 +801,9 @@ class Bot:
         if cmd in ("/tomorrow", "מחר"):
             self.tg.send(self.day_text(today + timedelta(days=1)))
             return
+        if cmd in ("/exams", "מבחנים"):
+            self.tg.send(self.exams_text())
+            return
         if cmd in ("/absences", "היעדרויות", "נוכחות"):
             self.tg.send(self.attendance_text())
             return
@@ -800,6 +834,10 @@ class Bot:
                            "courses": {k: v["name"] for k, v in COURSES.items()},
                            "sessions": sess, "recap_context": pend,
                            "personal_events": self.personal_for_llm(),
+                           "exams_moed_a": [{"course": c, "at": P.iso(dt), "days_left": n} for c, dt, n in SEM.upcoming_exams(today)],
+                           "syllabus_this_week": SEM.topics_for_week(P.week_start(today)),
+                           "semester_end": SEM.SEMESTER_END.isoformat(),
+                           "absences": {c: self.absences(c) for c in COURSES if self.absences(c)},
                            "open_assignments": [a for a in self.st["assignments"] if a.get("status") != "done"]},
                           ensure_ascii=False)
 
@@ -904,6 +942,28 @@ class Bot:
             self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": a.get("text", "")})
             return ""
         return ""
+
+    # ------------------------------------------------------------ exams & syllabus
+    def exam_line(self, c: str, dt: datetime, days: int) -> str:
+        when = "היום" if days == 0 else "מחר" if days == 1 else f"בעוד {days} ימים"
+        return f"{COURSES[c]['name']}: {when} ({HEB_DAY[dt.weekday()]} {dt.day}.{dt.month}, {dt:%H:%M})"
+
+    def exams_text(self) -> str:
+        today = self.now.date()
+        up = SEM.upcoming_exams(today, "a")
+        lines = ["⏳ מבחנים · מועד א'"] + [f"• {self.exam_line(c, dt, n)}" for c, dt, n in up]
+        if not up:
+            lines.append("• כל מועדי א' כבר עברו.")
+        upb = SEM.upcoming_exams(today, "b")
+        if upb:
+            lines += ["", "מועד ב':"] + [f"• {COURSES[c]['name']}: {dt.day}.{dt.month} {dt:%H:%M}" for c, dt, _ in upb]
+        if today <= SEM.SEMESTER_END:
+            lines += ["", f"הסמסטר נגמר ב-{SEM.SEMESTER_END.day}.{SEM.SEMESTER_END.month} (בעוד {(SEM.SEMESTER_END - today).days} ימים)."]
+        return "\n".join(lines)
+
+    def syllabus_lines(self, ws: date, only: set | None = None) -> list[str]:
+        t = SEM.topics_for_week(ws)
+        return [f"• {COURSES[c]['name']}: {v}" for c, v in t.items() if c in COURSES and (only is None or c in only)]
 
     # ------------------------------------------------------------ attendance
     def absences(self, c: str) -> int:
@@ -1079,7 +1139,7 @@ HELP = """אני בוט הלימודים שלך 📚
 • 21:30: מה בוצע היום, ומה מחר.
 • מוצ״ש 21:00: סיכום שבוע ותוכנית לשבוע הבא.
 
-פקודות: היום · מחר · שבוע · היעדרויות
+פקודות: היום · מחר · שבוע · מבחנים · היעדרויות
 בריקאפ יש גם כפתורי נוכחות (הייתי / לא הייתי / מילואים), ואני סופר היעדרויות מול המגבלה בכל קורס.
 אפשר לכתוב חופשי, למשל: "עשיתי את מתמטיקה", "תזיז את כלכלה של מחר ל-10:00", "מטלה באקסל עד 5.11, שעתיים".
 
@@ -1111,4 +1171,5 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 - אם משהו לא ברור, אל תנחש פעולה: שאל ב-reply ו-actions ריק.
 - סשני לימוד (sessions) מזיזים עם move. אירועים אישיים (personal_events) רק עם personal.
 - ב-reply של שינוי אישי כתוב שנשלחה הצעה לאישור, לא שזה בוצע.
+- שאלות על מבחנים, נושאי השבוע לפי הסילבוס או היעדרויות: ענה מתוך exams_moed_a, syllabus_this_week ו-absences.
 - אתה לא מרצה ולא מסביר חומר. אם הוא שואל שאלה על לוח הזמנים, ענה מתוך ההקשר בלבד."""

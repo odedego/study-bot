@@ -190,6 +190,11 @@ def main():
     w = last(tg, "📊")
     show(w)
     check(w and "24.10" in w["text"], "second weekly review sent")
+    check(w and "⏳ המבחן הקרוב: מבוא לחשבונאות: בעוד 93 ימים" in w["text"], "weekly review shows exam countdown")
+    check(w and "📖 בשבוע הבא לפי הסילבוס:" in w["text"] and "כלכלה: פונקציית ייצור" in w["text"] and "ניהול בארגונים: חזון וערכים" in w["text"],
+          "weekly review shows next week's syllabus topics")
+    st = store.load()
+    check(sum(1 for a in st["assignments"] if a.get("source") == "syllabus") == 2, "syllabus deadlines seeded once")
     check("השבוע הבא" in w["text"], "next week plan included")
     nxt = [e for e in rev() if e["start"]["dateTime"][:10] >= "2026-10-25"]
     check(len(nxt) >= 6, f"next week sessions created ({len(nxt)})")
