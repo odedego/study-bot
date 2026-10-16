@@ -868,9 +868,13 @@ class Bot:
         pend = self.st["bot"].get("pending")
         if pend and pend.get("until", "") < P.iso(self.now):
             pend = None
+        uni, _ = self.load_uni()
+        lessons = [{"course": l.course, "start": P.iso(l.start)[:16], "end": P.iso(l.end)[11:16], "kind": l.kind}
+                   for l in sorted(uni.lessons, key=lambda l: l.start)
+                   if today - timedelta(days=1) <= l.day <= today + timedelta(days=7)]
         return json.dumps({"now": P.iso(self.now), "today": f"{HEB_DAY[today.weekday()]} {today.isoformat()}",
                            "courses": {k: v["name"] for k, v in COURSES.items()},
-                           "sessions": sess, "recap_context": pend,
+                           "sessions": sess, "lessons": lessons, "recap_context": pend,
                            "personal_events": self.personal_for_llm(),
                            "exams_moed_a": [{"course": c, "at": P.iso(dt), "days_left": n} for c, dt, n in SEM.upcoming_exams(today)],
                            "syllabus_this_week": SEM.topics_for_week(P.week_start(today)),
@@ -1302,7 +1306,8 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 - סשני לימוד (sessions) מזיזים עם move. אירועים אישיים (personal_events) רק עם personal.
 - ב-reply של שינוי אישי כתוב שנשלחה הצעה לאישור, לא שזה בוצע.
 - שאלות על מבחנים, נושאי השבוע לפי הסילבוס או היעדרויות: ענה מתוך exams_moed_a, syllabus_this_week ו-absences.
-- אתה לא מרצה ולא מסביר חומר. אם הוא שואל שאלה על לוח הזמנים, ענה מתוך ההקשר בלבד."""
+- אתה לא מרצה ולא מסביר חומר. אם הוא שואל שאלה על לוח הזמנים, ענה מתוך ההקשר בלבד
+  (lessons = שיעורים באוניברסיטה בשבוע הקרוב, sessions = סשני לימוד, personal_events = אירועים אישיים)."""
 
 MEDIA_RULES = """
 
