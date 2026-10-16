@@ -698,7 +698,8 @@ class Bot:
             return
         if not self.authorized(chat):
             return
-        cmd = text.split()[0].lower()
+        # פקודה רק כשהמילה היא כל ההודעה ("מחר פנוי כל היום" זו הודעה חופשית, לא פקודה)
+        cmd = text.lower().split()[0] if text.startswith("/") else text.strip(" ?!.").lower()
         today = self.now.date()
         if cmd in ("/start", "/help", "עזרה"):
             self.tg.send(HELP)
