@@ -38,8 +38,8 @@ jobs:
           REVIEWS_CAL_ID: ${{ secrets.REVIEWS_CAL_ID }}
           PERSONAL_CAL_ID: ${{ secrets.PERSONAL_CAL_ID }}
           FEED_URL: ${{ secrets.FEED_URL }}
-          UPSTASH_URL: ${{ secrets.UPSTASH_URL }}
-          UPSTASH_TOKEN: ${{ secrets.UPSTASH_TOKEN }}
+          UPSTASH_URL: ${{ secrets.UPSTASH_URL || secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_TOKEN: ${{ secrets.UPSTASH_TOKEN || secrets.UPSTASH_REDIS_REST_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_MODEL: claude-sonnet-5-5
         run: python -m bot.main ${{ github.event.inputs.cmd || 'tick' }}
