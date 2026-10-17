@@ -19,6 +19,10 @@ XP_TTL_H = 48
 COURSES = P.COURSES
 
 
+class PlanBlocked(Exception):
+    """המערכת או היומן האישי לא נקראו עכשיו: לא משבצים."""
+
+
 def _dd(d: date) -> str:
     return f"{P.HEB_DAY[d.weekday()]} {d.day}.{d.month}"
 
@@ -30,14 +34,19 @@ class ExtrasMixin:
         n = sum(1 for s in self.st["sessions"] if s.get("kind") in EXTRA_KINDS and s.get("status") in ("planned", "done", "missed")
                 and ws.isoformat() <= s["start"][:10] < we.isoformat())
         for xid, p in self.st["bot"].get("xp", {}).items():
-            if xid != skip and p.get("state") == "pending":
+            if xid != skip and self._xp_live(p):
                 n += sum(1 for a, _ in p["slots"] if ws.isoformat() <= a[:10] < we.isoformat())
         return n
+
+    def _xp_live(self, p: dict) -> bool:
+        """הצעה שעוד יכולה להתממש: ממתינה, נשלחה, ולא פג תוקפה."""
+        return p.get("state") == "pending" and (p.get("mid") or p.get("send_try", 0) < 3) \
+            and self.now - datetime.fromisoformat(p["at"]) <= timedelta(hours=XP_TTL_H)
 
     def _taken(self) -> list:
         out = [P._session_from_state(s) for s in self.st["sessions"] if s.get("status") in ("planned", "done", "missed")]
         for p in self.st["bot"].get("xp", {}).values():
-            if p.get("state") == "pending":
+            if self._xp_live(p):
                 for a, b in p["slots"]:
                     out.append(P.Session("xp", "extra", p.get("course"), [p.get("course")],
                                          datetime.fromisoformat(a), datetime.fromisoformat(b)))
@@ -46,7 +55,10 @@ class ExtrasMixin:
     def find_slots(self, n: int, first: date, last: date, course: str | None = None, days: list | None = None,
                    budget: bool = True, extra_taken: list | None = None, skip_days: list | None = None) -> list[tuple[datetime, datetime]]:
         """סלוטים פנויים לפי כללי השיבוץ: לא בשבת, לא בערבי שני/רביעי, לא על שיעור או אירוע אישי, לא אחרי 23:00,
-        עד 2 סשנים מאותו קורס ביום, ועד 2 תוספות בשבוע (budget)."""
+        עד 2 סשנים מאותו קורס ביום, ועד 2 תוספות בשבוע (budget), ולא מעבר למה שעודד אמר על היום (capacity)."""
+        why = self.plan_guard()
+        if why:
+            raise PlanBlocked(why)
         uni, _ = self.load_uni()
         personal = self.load_personal(P.week_start(self.now.date()))
         taken = self._taken() + [P.Session("x", "extra", course, [course], a, b) for a, b in (extra_taken or [])]
@@ -70,6 +82,9 @@ class ExtrasMixin:
                 d += timedelta(days=1)
                 continue
             on_day = sum(1 for s in taken if s.start.date() == d)
+            if P.day_room(self.st, d, on_day) <= 0:
+                d += timedelta(days=1)
+                continue
             total_cap = P.CONFIG["reschedule_total_cap_free_day"] if prof["type"] == "free" else prof["cap"] + 1
             same = sum(1 for s in taken if s.start.date() == d and s.course == course) if course else 0
             if on_day >= total_cap or same >= P.CONFIG["max_same_course_per_day"]:
@@ -102,6 +117,7 @@ class ExtrasMixin:
     def _send_xp(self, xid: str):
         p = self.st["bot"]["xp"][xid]
         text = self._xp_text(p).replace("\n", "\nהצעה:\n", 1) + f"\n(מעבר ל-11 הסשנים הרגילים. עד {EXTRA_WEEKLY_MAX} תוספות בשבוע.)"
+        p["send_try"] = p.get("send_try", 0) + 1     # נכשל? resend_undelivered ינסה שוב (עד 3), אחרת "failed"
         p["mid"] = self.tg.send(text, [[("✅ שבץ", f"xp|ok|{xid}"), ("✖️ לא צריך", f"xp|no|{xid}")]])
 
     def _xp_text(self, p: dict) -> str:
@@ -131,11 +147,18 @@ class ExtrasMixin:
         p["state"] = "checking"   # לא נספר כתפוס בזמן שבודקים אותו מחדש
         try:
             return self._exec_extra(xid, p)
-        except Exception:
+        except PlanBlocked as e:
             p["state"] = "pending"
+            return f"לא יכול לשבץ עכשיו: {str(e)[:80]}. נסה שוב עוד כמה דקות"
+        except Exception:
+            # אם כבר נוצרו אירועים: לא חוזרים ל"ממתין" (לחיצה נוספת הייתה יוצרת עוד סט)
+            p["state"] = "partial" if p.get("made") else "pending"
             raise
 
     def _exec_extra(self, xid: str, p: dict) -> str:
+        why = self.plan_guard()
+        if why:
+            raise PlanBlocked(why)
         uni, _ = self.load_uni()
         personal = self.load_personal(P.week_start(self.now.date()))
         taken = self._taken()
@@ -156,9 +179,9 @@ class ExtrasMixin:
             p["state"] = "failed"
             self.tg.edit(p["mid"], self._xp_text(p) + "\n\n⚠️ הזמנים האלה כבר לא פנויים ולא מצאתי חלופה. בקש שוב.")
             return "לא נמצא זמן"
-        made = []
+        made = p.setdefault("made", [])
         for i, (a, b) in enumerate(final):
-            key = f"{p['kind']}:{p['course']}:{p.get('ref') or xid}:{i + 1}@{a.date().isoformat()}"
+            key = self.unique_key(f"{p['kind']}:{p['course']}:{p.get('ref') or xid}:{i + 1}@{a.date().isoformat()}")
             sess = P.Session(key, p["kind"], p["course"], [p["course"]], a, b, None, note=p["note"], label=p["label"])
             js = sess.to_json()
             eid = self.create_event(js)
@@ -166,8 +189,20 @@ class ExtrasMixin:
                                        | {"status": "planned", "eventId": eid})
             made.append(f"• {_dd(a.date())} {P.fmt_t(a)}")
         p["state"] = "done"
-        self.tg.edit(p["mid"], self._xp_text(p) + "\n\n✅ שובץ ביומן:\n" + "\n".join(made))
+        try:
+            self.tg.edit(p["mid"], self._xp_text(p) + "\n\n✅ שובץ ביומן:\n" + "\n".join(made))
+        except Exception as e:  # noqa: BLE001
+            self.log.append(f"xp edit: {type(e).__name__}")
         return "✅ שובץ"
+
+    def unique_key(self, key: str) -> str:
+        """מפתח שלא היה בשימוש (גם לא בסשן שהורד/נמחק): אחרת ה-id ביומן היה חוזר על אירוע שנמחק."""
+        used = {s["key"] for s in self.st["sessions"]} | set(self.st.get("archived_keys", []))
+        k, n = key, 1
+        while k in used:
+            n += 1
+            k = f"{key}#{n}"
+        return k
 
     # ------------------------------------------------------------ triggers
     def maybe_reinforce(self, course: str, d: str, rating: int, unclear: str = "") -> str:
@@ -181,8 +216,12 @@ class ExtrasMixin:
         done.append(tag)
         self.st["bot"]["reinf"] = done[-60:]
         today = self.now.date()
-        slots = self.find_slots(1, today + timedelta(days=1), today + timedelta(days=4), course)
         name = COURSES[course]["name"]
+        try:
+            slots = self.find_slots(1, today + timedelta(days=1), today + timedelta(days=4), course)
+        except PlanBlocked:
+            done.remove(tag)      # ננסה שוב בציון הבא / מחר
+            return f"💪 {name}: כדאי חיזוק, אבל אני לא מצליח לקרוא את המערכת עכשיו. כתוב לי \"תוסיף חיזוק ב{name}\" עוד מעט."
         if not slots:
             return f"💪 לא מצאתי מקום לחיזוק ב{name} בימים הקרובים (או שכבר יש {EXTRA_WEEKLY_MAX} תוספות השבוע). כתוב לי אם לחפש בכל זאת."
         what = f": {unclear[:40]}" if unclear else ""
@@ -204,10 +243,13 @@ class ExtrasMixin:
         last = due_d - timedelta(days=1)
         if last < today:
             return ""
-        a["work_offered"] = True
         n = min(EXTRA_WEEKLY_MAX, math.ceil(int(est) / P.CONFIG["session_min"]))
-        slots = self.find_slots(n, today + timedelta(days=1) if last > today else today, last, a["course"])
         name = COURSES.get(a["course"], {}).get("name", a["course"])
+        try:
+            slots = self.find_slots(n, today + timedelta(days=1) if last > today else today, last, a["course"])
+        except PlanBlocked:
+            return f"📝 אציע זמן עבודה למטלה כשאצליח לקרוא את המערכת. כתוב לי שוב את ההערכה (\"{a['title'][:30]} ייקח שעתיים\") עוד מעט."
+        a["work_offered"] = True
         if not slots:
             return f"📝 לא מצאתי זמן עבודה למטלה לפני {due_d.day}.{due_d.month} (או שכבר יש {EXTRA_WEEKLY_MAX} תוספות). היא תופיע בסיכומים היומיים."
         self.propose_extra("assign", a["course"], f"📝 מטלה · {name}: {a['title'][:40]}",
@@ -221,18 +263,43 @@ class ExtrasMixin:
         if day < self.now.date():
             raise ValueError("התאריך כבר עבר")
         if free_day:
-            return self._free_day(day)
+            self.st.setdefault("capacity", {}).pop(d, None)
+            try:
+                return self._free_day(day)
+            except PlanBlocked as e:
+                return f"👍 רשמתי. לא מצאתי עכשיו זמן לתרגול נוסף ({str(e)[:60]})."
         if max_sessions is None:
             self.st["pending_questions"].append({"id": f"cap-{d}", "text": f"קיבולת {d}: {text}", "asked": P.iso(self.now)})
             return "📌 רשמתי. תגיד לי כמה סשנים אתה יכול באותו יום, ואסדר לפי זה."
         max_sessions = max(0, int(max_sessions))
-        on_day = sorted([s for s in self.st["sessions"] if s.get("status") == "planned" and s["start"][:10] == d
-                         and datetime.fromisoformat(s["start"]) > self.now],
-                        key=lambda s: (s.get("kind") in EXTRA_KINDS, s.get("kind") == "marathon",
-                                       COURSES.get(s.get("course"), {}).get("tier", 0), s["start"]))
-        extra = on_day[max_sessions:]
-        if not extra:
-            return f"👍 ב-{_dd(day)} יש {len(on_day)} סשנים, זה כבר בתוך מה שאמרת."
+        # נשמר: גם שיבוץ עתידי (סנכרון שבועי, השלמות, תוספות, מרתון) לא יעבור את זה
+        self.st.setdefault("capacity", {})[d] = max_sessions
+        span = "אין סשנים" if max_sessions == 0 else f"עד {max_sessions} סשנים"
+        on_day = self._cap_sessions(d)
+        if len(on_day) <= max_sessions:
+            return f"👍 רשמתי: ב-{_dd(day)} {span}. כרגע יש שם {len(on_day)}, ולא אוסיף מעבר לזה."
+        why = self.plan_guard()
+        if why:
+            return f"👍 רשמתי: ב-{_dd(day)} {span}. כרגע אני לא מצליח לקרוא את המערכת, אז אזיז את העודף בהודעת הבוקר."
+        return self._move_surplus(day, max_sessions)
+
+    def _cap_sessions(self, d: str) -> list[dict]:
+        return sorted([s for s in self.st["sessions"] if s.get("status") == "planned" and s["start"][:10] == d
+                       and datetime.fromisoformat(s["start"]) > self.now],
+                      key=lambda s: (s.get("kind") in EXTRA_KINDS, s.get("kind") == "marathon",
+                                     COURSES.get(s.get("course"), {}).get("tier", 0), s["start"]))
+
+    def enforce_capacity(self) -> list[str]:
+        """בבוקר: ימים שעודד הגביל ועדיין יש בהם יותר מדי (למשל כי ההזזה נדחתה כשהמערכת לא נקראה)."""
+        out = []
+        for d, n in sorted(self.st.get("capacity", {}).items()):
+            if len(self._cap_sessions(d)) > n:
+                out.append(self._move_surplus(date.fromisoformat(d), n))
+        return out
+
+    def _move_surplus(self, day: date, max_sessions: int) -> str:
+        d = day.isoformat()
+        extra = self._cap_sessions(d)[max_sessions:]
         out, moving = [], []
         for s in extra:
             title = P._session_from_state(s).title()
@@ -277,8 +344,15 @@ class ExtrasMixin:
                         pass
                 a = datetime.fromisoformat(x["start"])
                 out.append(f"• {x['from_title']} → {_dd(a.date())} {P.fmt_t(a)}")
+            idx = {x["key"]: x for x in self.st["sessions"]}
             for x in r["not_placed"]:
-                out.append(f"• {x['title']}: לא מצאתי מקום השבוע, עובר לחזרה השבועית")
+                s0 = idx.get(x["key"])
+                if s0 and s0.get("eventId"):
+                    try:
+                        self.cal.delete(self.reviews_cal, s0["eventId"])   # לא משאירים אותו ביום שפינית
+                    except Exception as e:  # noqa: BLE001
+                        self.log.append(f"capacity delete: {e}")
+                out.append(f"• {x['title']}: לא מצאתי מקום השבוע, הורד מהיומן ועובר לחזרה השבועית")
         return f"✅ השארתי ב-{_dd(day)} {max_sessions} סשנים. הזזתי:\n" + "\n".join(out)
 
     def _drop(self, s: dict, note: str):

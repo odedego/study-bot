@@ -37,7 +37,9 @@ console.upstash.com ← מסד ה-Redis הקיים שלך (או Create database 
 
 ## 6. סריקת מייל (רשות, 10 דקות)
 הבוט קורא פעם ביום מיילים מהאוניברסיטה ומסכם אותם בהודעת הבוקר. הגישה ל-Gmail נשארת בחשבון שלך:
-סקריפט קטן ב-Google Apps Script שולח לבוט רק מיילים שעונים על חיפוש מוגדר (מהאוניברסיטה, או עם מילים כמו מטלה/מבחן בנושא).
+סקריפט קטן ב-Google Apps Script שולח לבוט רק מיילים משולחים של האוניברסיטה (runi.ac.il / idc.ac.il).
+מתרגל שכותב מ-Gmail פרטי לא ייכלל. כדי להוסיף שולח, הוסף ב-Script properties ערך `QUERY` עם החיפוש המלא
+(למשל להעתיק את ברירת המחדל מהקוד ולהוסיף `OR from:name@gmail.com`).
 1. היכנס ל-script.google.com ← New project. תן שם `study-bot-mail`.
 2. מחק את מה שכתוב שם והדבק את כל התוכן של `apps_script/Code.gs` מה-repo.
 3. בצד שמאל ⚙️ Project Settings ← למטה Script properties ← Add script property, פעמיים:

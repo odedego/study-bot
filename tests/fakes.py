@@ -105,6 +105,7 @@ class FakeCalendar:
         self.fail_next_list = False
         self.calls = []
         self.deleted = set()
+        self.trash = {}
 
     def add(self, cal, ev):
         self.cals.setdefault(cal, {})[ev["id"]] = copy.deepcopy(ev)
@@ -138,6 +139,16 @@ class FakeCalendar:
         return ev
 
     def patch(self, cal, eid, body):
+        """כמו ב-Google: אירוע שנמחק נשאר כ"מבוטל", ו-status=confirmed מחזיר אותו."""
+        if eid not in self.cals.get(cal, {}):
+            gone = self.trash.get(cal, {}).get(eid)
+            if gone is None or body.get("status") != "confirmed":
+                raise RuntimeError(f"calendar PATCH: 404 {eid}")
+            self.cals[cal][eid] = gone
+            self.trash[cal].pop(eid)
+            self.deleted.discard(eid)
+            self.calls.append(("revive", cal, eid))
+        body = {k: v for k, v in body.items() if k != "status"}
         self.cals[cal][eid].update(copy.deepcopy(body))
         self.cals[cal][eid]["etag"] = str(int(self.cals[cal][eid].get("etag", "0")) + 1)
         self.calls.append(("patch", cal, eid))
@@ -158,8 +169,12 @@ class FakeCalendar:
     def access_role(self, cal):
         return self.roles.get(cal, "writer")
 
+    trash: dict = {}
+
     def delete(self, cal, eid):
-        self.cals.get(cal, {}).pop(eid, None)
+        ev = self.cals.get(cal, {}).pop(eid, None)
+        if ev is not None:
+            self.trash.setdefault(cal, {})[eid] = ev
         self.deleted.add(eid)
 
 

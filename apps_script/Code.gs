@@ -16,12 +16,13 @@
  *   3. זהו. install מריץ סריקה ראשונה ומתקין הרצה יומית.
  */
 
-// אפשר לשנות את החיפוש ב-Script properties (QUERY). ברירת המחדל:
+// אפשר לשנות את החיפוש ב-Script properties (QUERY). ברירת המחדל: רק שולחים מהאוניברסיטה
+// (כדי שמייל מבחוץ עם "מטלה" בנושא לא יגיע לבוט).
 const DEFAULT_QUERY =
   'newer_than:2d -in:sent -in:chats -category:promotions -category:social ' +
-  '(from:runi.ac.il OR from:idc.ac.il OR from:moodle OR from:yedion ' +
-  'OR subject:(מטלה OR הגשה OR בחינה OR מבחן OR בוחן OR שיעור OR תרגיל OR ציון OR קורס OR סמסטר))';
+  '(from:runi.ac.il OR from:post.runi.ac.il OR from:idc.ac.il OR from:post.idc.ac.il)';
 const KEY = 'study-bot:mail';
+const BATCH = 20;
 
 function install() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
@@ -44,7 +45,6 @@ function scan() {
     thread.getMessages().forEach(function (m) {
       const id = m.getId();
       if (seen.indexOf(id) >= 0 || m.getDate().getTime() < since) return;
-      seen.push(id);
       out.push({
         id: id,
         from: m.getFrom(),
@@ -56,9 +56,11 @@ function scan() {
     });
   });
 
-  if (out.length) {
-    const cmds = out.slice(0, 25).map(function (x) { return ['RPUSH', KEY, JSON.stringify(x)]; });
-    cmds.push(['LTRIM', KEY, '-60', '-1']);
+  // נשלח בקבוצות, ומסומן כ"נראה" רק מה שבאמת הגיע ל-Upstash (מייל שלא נשלח ינוסה שוב מחר)
+  let sent = 0;
+  for (let i = 0; i < out.length; i += BATCH) {
+    const part = out.slice(i, i + BATCH);
+    const cmds = part.map(function (x) { return ['RPUSH', KEY, JSON.stringify(x)]; });
     const r = UrlFetchApp.fetch(url + '/pipeline', {
       method: 'post', contentType: 'application/json', muteHttpExceptions: true,
       headers: { Authorization: 'Bearer ' + token }, payload: JSON.stringify(cmds)
@@ -66,7 +68,14 @@ function scan() {
     if (r.getResponseCode() !== 200) {
       throw new Error('Upstash: ' + r.getResponseCode() + ' ' + r.getContentText().slice(0, 200));
     }
+    const res = JSON.parse(r.getContentText());
+    part.forEach(function (x, j) {
+      if (res[j] && res[j].error === undefined) { seen.push(x.id); sent++; }
+    });
+    props.setProperty('SEEN', JSON.stringify(seen.slice(-300)));
+    if (res.some(function (x) { return x && x.error !== undefined; })) {
+      throw new Error('Upstash: ' + JSON.stringify(res).slice(0, 200));
+    }
   }
-  props.setProperty('SEEN', JSON.stringify(seen.slice(-300)));
-  Logger.log('נשלחו ' + out.length + ' מיילים');
+  Logger.log('נשלחו ' + sent + ' מיילים');
 }

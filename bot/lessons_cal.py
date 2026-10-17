@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import planner as P
 from bot import semester as SEM
 
 MAX_WRITES_PER_RUN = 60   # הסנכרון הראשון (~120 שיעורים) מתחלק לכמה הרצות
+SYNC_EVERY_MIN = 60       # ביטול או שינוי חדר באותו יום מגיעים תוך שעה
+MISS_TO_DELETE = 2        # שיעור שנעלם מהפיד בלי סימון ביטול: נמחק רק אחרי שני סנכרונים רצופים (שעתיים)
 
 
 def _h(body: dict) -> str:
@@ -26,7 +28,9 @@ class LessonsCalMixin:
         lc = self.st["bot"].get("lessons_cal", {})
         if self.now.date() < SEM.LESSONS_CAL_FROM or lc.get("off") or self.now.hour < 7:
             return False
-        return lc.get("incomplete") or lc.get("last", "")[:10] != self.now.date().isoformat()
+        if lc.get("incomplete") or not lc.get("last"):
+            return True
+        return self.now - datetime.fromisoformat(lc["last"]) >= timedelta(minutes=SYNC_EVERY_MIN)
 
     def _lesson_bodies(self, uni) -> dict:
         today = self.now.date()
@@ -41,8 +45,9 @@ class LessonsCalMixin:
                                         "description": "מתוך מערכת השעות של האוניברסיטה. מתעדכן אוטומטית מבוט הלימודים."}
         for c, e in uni.cancelled:
             if c and lo <= e.start.date() <= hi:
-                k = f"{c}:{e.start.date().isoformat()}:בוטל"
-                if not any(x.startswith(f"{c}:{e.start.date().isoformat()}:") for x in out):
+                # אותו מפתח כמו השיעור עצמו: האירוע הקיים מתעדכן ל"🚫 בוטל" במקום למחוק וליצור
+                k = f"{c}:{e.start.date().isoformat()}:{'תרגול' if 'תרגול' in e.description else 'שיעור'}"
+                if k not in out:
                     out[k] = {"summary": f"🚫 בוטל · {SEM.FULL_NAMES.get(c, c)}", "location": e.location, "transparency": "transparent",
                               "start": {"dateTime": e.start.isoformat(), "timeZone": "Asia/Jerusalem"},
                               "end": {"dateTime": e.end.isoformat(), "timeZone": "Asia/Jerusalem"},
@@ -85,16 +90,24 @@ class LessonsCalMixin:
             if cur and cur["h"] == h:
                 continue
             if cur:
-                self.cal.patch(lc["id"], cur["id"], body)
+                # status=confirmed: אם האירוע נמחק בעבר (שיעור שנעלם וחזר), זה מחזיר אותו
+                self.cal.patch(lc["id"], cur["id"], dict(body, status="confirmed"))
             else:
-                cur = {"id": self.cal.create(lc["id"], dict(body, id=event_id("lc:" + k)))["id"]}
+                cur = {"id": self.create_revive(lc["id"], dict(body, id=event_id("lc:" + k)))}
             have[k] = {"id": cur["id"], "h": h, "d": k.split(":")[1]}
             writes += 1
+        for k in want:
+            if k in have:
+                have[k].pop("miss", None)
         today = self.now.date().isoformat()
         for k in [k for k, v in have.items() if k not in want and v["d"] >= today]:
             if writes >= MAX_WRITES_PER_RUN:
                 break
-            self.cal.delete(lc["id"], have.pop(k)["id"])
+            have[k]["miss"] = have[k].get("miss", 0) + 1
+            if have[k]["miss"] < MISS_TO_DELETE:
+                continue          # אולי תקלה רגעית בפיד: מחכים לסנכרון הבא
+            self.cal.delete(lc["id"], have[k]["id"])   # קודם מוחקים, ורק אז שוכחים (אחרת אירוע יתום)
+            have.pop(k)
             writes += 1
         old = (self.now.date() - timedelta(days=7)).isoformat()
         lc["map"] = {k: v for k, v in have.items() if v["d"] >= old}

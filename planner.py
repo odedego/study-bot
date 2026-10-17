@@ -76,6 +76,7 @@ CONFIG = {
     "closed_weekdays": [SAT],
     "saturday_backup_start": "12:00",
     "max_same_course_per_day": 2,
+    "day_total_max": 7,                # תקרה כוללת ליום (חזרות + תוספות + מרתון)
     "weekly_review_weekday": SUN,
     "weekly_review_cap": 4,
     "recap_after_min": 20,
@@ -437,10 +438,19 @@ class Demand:
         return (COURSES[self.course]["tier"], self.lesson.end, COURSE_ORDER.index(self.course), self.unit)
 
 
+def day_room(st: dict | None, day: date, on_day: int) -> int:
+    """כמה עוד סשנים אפשר להוסיף ביום: לפי מה שעודד אמר על היום הזה (st["capacity"]) ותקרה כוללת של 7."""
+    lim = CONFIG["day_total_max"]
+    cap = (st or {}).get("capacity", {}).get(day.isoformat())
+    if cap is not None:
+        lim = min(lim, int(cap))
+    return max(0, lim - on_day)
+
+
 def marathon_on(st: dict | None, d: date) -> bool:
     """במרתון אין חזרה שבועית ביום ראשון: סשני המרתון מחליפים אותה."""
     m = (st or {}).get("marathon") or {}
-    return bool(m.get("start")) and m.get("status") in ("scheduled", "active") and d.isoformat() >= m["start"]
+    return bool(m.get("start")) and m.get("status") in ("scheduled", "active") and m["start"] <= d.isoformat() <= m.get("end", "9999")
 
 
 def target_of(c: str, st: dict | None) -> int:
@@ -512,7 +522,8 @@ def plan_week(ws: date, uni: Uni, personal: list[Ev], st: dict | None = None) ->
         if prof["type"] in ("free", "evening_class", "free_with_class"):
             groups = [g for g in CONFIG["weekly_groups"] if any(c in prev_courses for c in g)]
             groups = [[c for c in g if c in prev_courses] for g in groups][: CONFIG["weekly_review_cap"]]
-            slots = free_slots(sun, prof, busy_blocks(sun, uni, personal), sessions, cap=len(groups))
+            room = day_room(st, sun, sum(1 for s in sessions if s.start.date() == sun))
+            slots = free_slots(sun, prof, busy_blocks(sun, uni, personal), sessions, cap=min(len(groups), room))
             for i, (g, sl) in enumerate(zip(groups, slots)):
                 sessions.append(Session(f"weekly:{sun.isoformat()}:{i + 1}", "weekly", None, g, sl[0], sl[1]))
             if len(slots) < len(groups):
@@ -539,7 +550,8 @@ def plan_week(ws: date, uni: Uni, personal: list[Ev], st: dict | None = None) ->
             continue  # ראשון שמור לחזרה השבועית
         prof = day_profile(day, uni)
         already = sum(1 for s in sessions if s.start.date() == day and s.kind in ("review", "rescheduled"))
-        slots = free_slots(day, prof, busy_blocks(day, uni, personal), sessions, cap=max(0, prof["cap"] - already))
+        room = day_room(st, day, sum(1 for s in sessions if s.start.date() == day))
+        slots = free_slots(day, prof, busy_blocks(day, uni, personal), sessions, cap=max(0, min(prof["cap"] - already, room)))
         per_course = Counter(s.course for s in sessions if s.start.date() == day and s.kind in ("review", "rescheduled"))
         for s0, e0 in slots:
             ready = [d for d in pending if d.lesson.end <= s0 and per_course[d.course] < CONFIG["max_same_course_per_day"]]
@@ -817,6 +829,8 @@ def reschedule(today: date, uni: Uni, personal: list[Ev], state: dict, now: date
                 continue
             same = sum(1 for s in existing if s.start.date() == day and s.course == m["course"])
             if same >= CONFIG["max_same_course_per_day"]:
+                continue
+            if day_room(state, day, sum(1 for s in existing if s.start.date() == day)) <= 0:
                 continue
             if wd == SAT:
                 # גיבוי בשבת רק לחומר של חמישי

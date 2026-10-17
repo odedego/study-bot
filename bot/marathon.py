@@ -31,9 +31,17 @@ class MarathonMixin:
     # ------------------------------------------------------------ state
     def mar(self) -> dict:
         m = self.st.setdefault("marathon", {})
+        if m.get("sem") and m["sem"] != SEM.MARATHON_START.isoformat():
+            m.clear()             # סמסטר חדש (semester.py הוחלף): מרתון חדש מאפס
+        m.setdefault("sem", SEM.MARATHON_START.isoformat())
         m.setdefault("start", SEM.MARATHON_START.isoformat())
         m.setdefault("status", "scheduled")
-        for k, v in {"blocked": {}, "need": {}, "scores": {}, "committed": [], "archived_done": {}, "archived_total": {}}.items():
+        ex = self.mar_exams()
+        if ex:
+            m["end"] = ex[-1][1].isoformat()
+            if m["status"] in ("scheduled", "active") and self.now.date() > ex[-1][1]:
+                m["status"] = "done"
+        for k, v in {"blocked": {}, "need": {}, "scores": {}, "committed": [], "archived_done": {}, "archived_total": {}, "seq": {}}.items():
             m.setdefault(k, v)
         return m
 
@@ -65,6 +73,11 @@ class MarathonMixin:
                     n += 1
         return n
 
+    def mar_user_deleted(self, c: str) -> int:
+        """סשני מרתון שעודד מחק ביומן: החלטה שלו. לא משבצים אותם מחדש במקום אחר."""
+        return sum(1 for s in self.st["sessions"] if s.get("kind") == "marathon" and s.get("course") == c
+                   and s.get("status") == "dropped" and str(s.get("note", "")).startswith("נמחק ממך"))
+
     def mar_best(self, c: str):
         sc = self.mar()["scores"].get(c, [])
         return max((x["s"] for x in sc), default=None)
@@ -87,6 +100,9 @@ class MarathonMixin:
             prof = dict(prof, end=P.at(d, P.hm(end)), cap=max(0, cap))
         if d == self.now.date():
             prof = dict(prof, start=max(prof["start"], P._round_up(self.now + timedelta(minutes=30))))
+        on_day = sum(1 for s in taken if s.start.date() == d)
+        prof = dict(prof, cap=min(prof["cap"], P.day_room(self.st, d, on_day),
+                                  max(0, SEM.MARATHON_DAY_CAP - on_day)))   # 7 ביום בסך הכול, כולל חזרות
         return P.free_slots(d, prof, P.busy_blocks(d, uni, personal), taken)
 
     def mar_split(self, c: str) -> int:
@@ -100,7 +116,7 @@ class MarathonMixin:
         for c, ed in self.mar_exams(after=today):
             planned = sum(1 for s in self.st["sessions"] if s.get("kind") == "marathon" and s.get("course") == c
                           and s.get("status") == "planned" and datetime.fromisoformat(s["end"]) > self.now)
-            rem = self.mar_need(c) - self.mar_count(c, True) - planned
+            rem = self.mar_need(c) - self.mar_count(c, True) - planned - self.mar_user_deleted(c)
             if self.mar_mastered(c):
                 rem = min(rem, 1 - planned if planned < 1 else 0)
                 out[c] = (0, max(0, rem))
@@ -156,18 +172,16 @@ class MarathonMixin:
             prev = ed
         # 2) סיכומים: מוקדם ככל האפשר, משולבים
         left = {c: rem.get(c, (0, 0))[0] for c, _ in exams}
-        for d in sorted(cap):
-            per = Counter(plan[d])
-            while free(d) > 0:
-                open_c = [c for c, _ in exams if left[c] > 0 and d < exam_day[c]]
-                if not open_c:
-                    break
-                pick = next((c for c in open_c if per[c] < 3), None) or (open_c[0] if len(open_c) == 1 else None)
-                if not pick:
-                    break
-                plan[d].append(pick)
-                per[pick] += 1
-                left[pick] -= 1
+        for limit in (3, PRACTICE_PER_DAY, None):     # קודם משלבים קורסים, ורק אם חסר מקום מעמיסים יותר מאותו קורס
+            for d in sorted(cap):
+                per = Counter(plan[d])
+                while free(d) > 0:
+                    pick = next((c for c, _ in exams if left[c] > 0 and d < exam_day[c] and (limit is None or per[c] < limit)), None)
+                    if not pick:
+                        break
+                    plan[d].append(pick)
+                    per[pick] += 1
+                    left[pick] -= 1
         for c, n in left.items():
             short[c] += n
         order = {c: i for i, (c, _) in enumerate(exams)}
@@ -207,6 +221,9 @@ class MarathonMixin:
         """כותב ליומן את ימי המרתון הקרובים שעוד לא נכתבו. מחזיר שורות להודעה."""
         if not self.mar_active():
             return []
+        why = self.plan_guard()
+        if why:
+            return [f"⚠️ מרתון: לא שיבצתי היום ({why[:80]})"]
         m = self.mar()
         if m["status"] == "scheduled":
             m["status"] = "active"
@@ -225,7 +242,8 @@ class MarathonMixin:
             slots = self.mar_day_slots(d, uni, personal, taken, exam_days)
             for c, (a, b) in zip(courses, slots):
                 i = self.mar_count(c, False) + 1
-                key = f"marathon:{c}:{d.isoformat()}:{i}"
+                m["seq"][c] = m["seq"].get(c, 0) + 1
+                key = self.unique_key(f"marathon:{c}:{d.isoformat()}:s{m['seq'][c]}")
                 sess = P.Session(key, "marathon", c, [c], a, b, None, note="מרתון מבחנים. אחרי הסשן סמן ✅ בסיכום היומי.",
                                  label=self.mar_label(c, i))
                 js = sess.to_json()
@@ -310,6 +328,9 @@ class MarathonMixin:
 
     def mar_free(self, c: str) -> str:
         """אחרי שליטה: מפנה את סשני הקורס מהימים הקרובים (חוץ מהיום) ומשבץ בהם מחדש."""
+        why = self.plan_guard()
+        if why:
+            return f"⚠️ לא פיניתי: אני לא מצליח לקרוא את המערכת עכשיו ({why[:60]}). נסה שוב עוד מעט."
         later = self._mar_future(c)
         days = sorted({date.fromisoformat(s["start"][:10]) for s in later})
         n = self.mar_drop_days(days, "פונה אחרי שליטה", c) if days else 0

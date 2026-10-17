@@ -321,6 +321,7 @@ def marathon_part():
     check(math_window >= 10, f"math practice sits between the intro and math exams ({math_window})")
     check(max(Counter(v).most_common(1)[0][1] for d, v in plan.items() if d >= date(2027, 1, 16)) <= 4 or short,
           "no day crams more than 4 sessions of one course")
+    print("    plan:", {d.isoformat(): dict(Counter(v)) for d, v in sorted(plan.items()) if d >= date(2027, 1, 16)})
 
 
 def main():
