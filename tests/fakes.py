@@ -38,7 +38,8 @@ class FakeTelegram:
         self._mid = itertools.count(100)
 
     # API
-    def get_updates(self, offset):
+    def get_updates(self, offset, timeout=0):
+        self.polls = getattr(self, "polls", 0) + 1
         return [u for u in self.inbox if u["update_id"] >= offset]
 
     def send(self, text, buttons=None, chat_id=None):

@@ -103,6 +103,52 @@ class _GuardedCal:
 
 
 PP_TTL_H = 24  # הצעה לשינוי ביומן האישי פגה אחרי יממה
+CHAT_KEEP = 16       # כמה הודעות אחרונות נשמרות כהקשר לשיחה
+CHAT_HOURS = 12      # ולא ישנות מזה
+COMMANDS = {"/start", "/help", "עזרה", "/today", "היום", "/tomorrow", "מחר", "/exams", "מבחנים", "/check", "בדיקה",
+            "/marathon", "מרתון", "/absences", "היעדרויות", "נוכחות", "/week", "שבוע"}
+
+
+def command_of(text: str) -> str | None:
+    """פקודה רק כשהמילה היא כל ההודעה ("מחר פנוי כל היום" זו הודעה חופשית, לא פקודה)."""
+    t = (text or "").strip()
+    cmd = t.lower().split()[0] if t.startswith("/") else t.strip(" ?!.").lower()
+    return cmd if cmd in COMMANDS else None
+
+
+class _ChatTG:
+    """עוטף את טלגרם: כל מה שהבוט שולח לעודד נרשם גם בהיסטוריית השיחה, כדי ש-Claude יבין המשכים."""
+    def __init__(self, tg, bot):
+        self._tg, self._bot = tg, bot
+
+    def __getattr__(self, name):
+        return getattr(self._tg, name)
+
+    def send(self, text, buttons=None, chat_id=None):
+        mid = self._tg.send(text, buttons, chat_id)
+        if chat_id is None or str(chat_id) == str(self._tg.chat_id):
+            self._bot.remember("b", text)
+        return mid
+
+    def edit(self, message_id, text, buttons=None):
+        self._tg.edit(message_id, text, buttons)
+        tail = text.strip().split("\n")[-1]
+        if tail:
+            self._bot.remember("b", "(עדכון להודעה קודמת) " + tail)
+
+
+LONG_EVENTS = ("חתונ", "בר מצו", "בת מצו", "בר-מצו", "בת-מצו", "אירוסין", "חינה", "מסיב", "הופע", "קונצרט", "בריתה", "שבע ברכות")
+MEAL_EVENTS = ("ארוח", "מסעד", "ברית")
+
+
+def default_duration(text: str) -> timedelta:
+    """כשלא נאמרה שעת סיום: חתונה/אירוע ערב 4 שעות, ארוחה/ברית שעתיים, כל השאר שעה."""
+    t = text or ""
+    if any(k in t for k in LONG_EVENTS):
+        return timedelta(hours=4)
+    if any(k in t for k in MEAL_EVENTS):
+        return timedelta(hours=2)
+    return timedelta(hours=1)
 
 
 def parse_local(v: str) -> datetime:
@@ -112,7 +158,7 @@ def parse_local(v: str) -> datetime:
 
 class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
     def __init__(self, tg, cal, feed, store, llm, cfg: dict, now_fn=None):
-        self.tg, self.feed, self.store, self.llm = tg, feed, store, llm
+        self.tg, self.feed, self.store, self.llm = _ChatTG(tg, self), feed, store, llm
         self._approved = False
         self.cal = _GuardedCal(cal, self)
         self.reviews_cal = cfg["REVIEWS_CAL"]
@@ -158,6 +204,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
         live = {s["key"] for s in self.st["sessions"]}
         b["ids"] = {k: v for k, v in b["ids"].items() if v in live}
         b["notes"] = b["notes"][-50:]
+        b["chat"] = b.get("chat", [])[-CHAT_KEEP:]
         old = P.iso(self.now - timedelta(days=7))
         b["pp"] = {k: v for k, v in b["pp"].items() if v.get("at", "") >= old}
         b["pids"] = dict(list(b["pids"].items())[-200:])
@@ -166,6 +213,21 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
         self.st.pop("checksum", None)
         self.st["checksum"] = P.state_checksum(self.st)
         self.store.save(self.st)
+
+    def remember(self, who: str, text: str):
+        st = getattr(self, "st", None)
+        if not st or not (text or "").strip():
+            return
+        chat = st["bot"].setdefault("chat", [])
+        chat.append({"w": who, "t": text.strip()[:500], "at": P.iso(self.now)})
+        del chat[:-CHAT_KEEP]
+
+    def chat_text(self) -> str:
+        old = P.iso(self.now - timedelta(hours=CHAT_HOURS))
+        rows = [c for c in self.st["bot"].get("chat", []) if c.get("at", "") >= old]
+        if not rows:
+            return ""
+        return "\n".join(f"{'עודד' if c['w'] == 'u' else 'בוט'} ({c['at'][11:16]}): {c['t']}" for c in rows)
 
     def short(self, key: str) -> str:
         s = sid(key)
@@ -733,11 +795,27 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
             self.st["bot"]["msgs"][str(mid)] = {"type": "weekly", "buttons": buttons}
 
     # ------------------------------------------------------------ telegram updates
-    def handle_updates(self):
+    @staticmethod
+    def _merge_texts(ups: list[dict]) -> list[dict]:
+        """הודעות טקסט רצופות (שלא פקודות) מאותו צ'אט מתאחדות להודעה אחת: "18:00" + "באותו יום שלישי" = בקשה אחת."""
+        out = []
+        for u in ups:
+            m = u.get("message") or {}
+            t = m.get("text")
+            prev = (out[-1].get("message") or {}) if out else {}
+            if t and prev.get("text") and prev.get("chat", {}).get("id") == m.get("chat", {}).get("id") \
+                    and not command_of(t) and not command_of(prev["text"]):
+                out[-1] = dict(out[-1], update_id=u["update_id"], message=dict(prev, text=prev["text"] + "\n" + t))
+            else:
+                out.append(u)
+        return out
+
+    def handle_updates(self, timeout: int = 0) -> int:
         b = self.st["bot"]
-        ups = self.tg.get_updates(b["offset"])
-        self.log.append(f"updates: {len(ups)} (offset {b['offset']})")
-        for i, u in enumerate(ups):
+        ups = self.tg.get_updates(b["offset"], timeout) if timeout else self.tg.get_updates(b["offset"])
+        if ups or not timeout:
+            self.log.append(f"updates: {len(ups)} (offset {b['offset']})")
+        for i, u in enumerate(self._merge_texts(ups)):
             b["offset"] = u["update_id"] + 1
             if i and i % 5 == 0:
                 self.save_state()
@@ -758,6 +836,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
                     pass
         if ups:
             self.save_state()
+        return len(ups)
 
     def authorized(self, chat_id) -> bool:
         return str(chat_id) == str(self.tg.chat_id)
@@ -851,6 +930,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
                 reply = "↩️ הוחזר ליומן"
             else:
                 reply = "כבר ביומן"
+        self.log.append(f"cb {kind}: {reply[:60]}")
         self.tg.answer(q["id"], reply)
 
     def _replace_row(self, mid, c: str):
@@ -891,8 +971,9 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
             return
         if not self.authorized(chat):
             return
-        # פקודה רק כשהמילה היא כל ההודעה ("מחר פנוי כל היום" זו הודעה חופשית, לא פקודה)
-        cmd = text.lower().split()[0] if text.startswith("/") else text.strip(" ?!.").lower()
+        cmd = command_of(text) or ""
+        if cmd:
+            self.remember("u", text)
         today = self.now.date()
         if cmd in ("/start", "/help", "עזרה"):
             self.tg.send(HELP)
@@ -997,6 +1078,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
                            "courses": {k: v["name"] for k, v in COURSES.items()},
                            "sessions": sess, "lessons": lessons, "recap_context": pend,
                            "personal_events": self.personal_for_llm(),
+                           "pending_proposals": self.pending_for_llm(),
                            "exams_moed_a": [{"course": c, "at": P.iso(dt), "days_left": n} for c, dt, n in SEM.upcoming_exams(today)],
                            "syllabus_this_week": SEM.topics_for_week(P.week_start(today)),
                            "semester_end": SEM.SEMESTER_END.isoformat(),
@@ -1010,12 +1092,14 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
             self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": text})
             self.tg.send("רשמתי. (בלי מפתח Claude אני מבין רק כפתורים ופקודות: /today /tomorrow /week)")
             return
+        hist = self.chat_text()
+        hist = f"\n\nהשיחה האחרונה בצ'אט (מהישן לחדש, בלי ההודעה הנוכחית):\n{hist}" if hist else ""
         try:
             if media:
-                raw = self.llm.complete(LLM_SYSTEM + MEDIA_RULES, f"הקשר:\n{self.context_for_llm()}\n\nהכיתוב של עודד לקובץ:\n{text}",
-                                        1500, media=media)
+                raw = self.llm.complete(LLM_SYSTEM + MEDIA_RULES,
+                                        f"הקשר:\n{self.context_for_llm()}{hist}\n\nהכיתוב של עודד לקובץ:\n{text}", 1500, media=media)
             else:
-                raw = self.llm.complete(LLM_SYSTEM, f"הקשר:\n{self.context_for_llm()}\n\nההודעה של עודד:\n{text}")
+                raw = self.llm.complete(LLM_SYSTEM, f"הקשר:\n{self.context_for_llm()}{hist}\n\nההודעה של עודד:\n{text}")
         except Exception as e:  # noqa: BLE001
             self.log.append(f"llm: {type(e).__name__}: {str(e)[:150]}")
             if media:
@@ -1024,6 +1108,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
             self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": text})
             self.tg.send("שמרתי את ההודעה, אבל לא הצלחתי לפענח אותה עכשיו. נסה שוב עוד מעט או השתמש בכפתורים.")
             return
+        self.remember("u", (f"[{'PDF' if media['mime'] == 'application/pdf' else 'תמונה'}] " if media else "") + text)
         m = re.search(r"\{.*\}", raw, re.S)
         try:
             plan = json.loads(m.group(0)) if m else {}
@@ -1150,6 +1235,17 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
             return "🙋 " + self.set_attendance(a.get("course"), a.get("date") or self.now.date().isoformat(), a.get("status"))
         if act == "personal":
             return self.propose_personal(a)
+        if act == "cancel_proposal":
+            p = self.st["bot"]["pp"].get(a.get("id", ""))
+            if not p or p.get("state") != "pending":
+                return ""
+            p["state"] = "cancelled"
+            if p.get("mid"):
+                try:
+                    self.tg.edit(p["mid"], self._pp_text(p) + "\n\n✖️ הוחלף בהצעה מעודכנת.")
+                except Exception as e:  # noqa: BLE001
+                    self.log.append(f"cancel edit: {type(e).__name__}")
+            return ""
         if act == "note":
             self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": a.get("text", "")})
             return ""
@@ -1239,6 +1335,13 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
                     self.log.append(f"personal_raw: {e}")
         return self._pers_raw
 
+    def pending_for_llm(self) -> list[dict]:
+        """הצעות ליומן האישי שנשלחו ועוד מחכות לאישור: כדי לא להציע שוב, ולדעת מה מחליפים כשעודד מתקן."""
+        old = P.iso(self.now - timedelta(hours=PP_TTL_H))
+        return [{"id": pid, "op": p["op"], "title": p.get("title", ""), "start": (p.get("new_start") or p.get("old_start") or "")[:16],
+                 "end": (p.get("new_end") or "")[:16]}
+                for pid, p in self.st["bot"]["pp"].items() if p.get("state") == "pending" and p.get("at", "") >= old]
+
     def personal_for_llm(self) -> list[dict]:
         out = []
         for e in self.personal_raw()[:80]:
@@ -1309,7 +1412,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
             if op == "move":
                 dur = datetime.fromisoformat(p["old_end"]) - datetime.fromisoformat(p["old_start"])
             else:
-                dur = timedelta(minutes=60)
+                dur = default_duration(p["title"] + " " + (a.get("description") or ""))
             en = parse_local(a["end"]) if a.get("end") else st0 + dur
             if en <= st0:
                 raise ValueError("שעת הסיום לפני שעת ההתחלה")
@@ -1371,6 +1474,22 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
                 return e.get("summary")
         return None
 
+    @staticmethod
+    def gcal_link(p: dict) -> str:
+        """קישור "הוספה ליומן" של Google עם כל הפרטים מוכנים (עובד בלי הרשאות ובלי לחכות לבוט)."""
+        from urllib.parse import urlencode
+        if p.get("all_day"):
+            dates = f"{p['new_start'].replace('-', '')}/{p['new_end'].replace('-', '')}"
+        else:
+            f = lambda v: datetime.fromisoformat(v).astimezone(TZ).strftime("%Y%m%dT%H%M%S")  # noqa: E731
+            dates = f"{f(p['new_start'])}/{f(p['new_end'])}"
+        q = {"action": "TEMPLATE", "text": p.get("title", ""), "dates": dates, "ctz": "Asia/Jerusalem"}
+        if p.get("location"):
+            q["location"] = p["location"]
+        if p.get("description"):
+            q["details"] = p["description"][:500]
+        return "https://calendar.google.com/calendar/render?" + urlencode(q)
+
     def cancel_personal(self, pid: str) -> str:
         p = self.st["bot"]["pp"].get(pid)
         if not p or p["state"] != "pending":
@@ -1424,9 +1543,12 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
                 self._approved = False
         except Exception as e:  # noqa: BLE001
             if " 403" in str(e):
+                rows = [[("✅ אשר", f"pp|ok|{pid}"), ("✖️ בטל", f"pp|no|{pid}")]]
+                if p["op"] == "create":
+                    rows.insert(0, [("📅 להוסיף בעצמי ב-Google", self.gcal_link(p))])
                 self.tg.edit(p["mid"], head + "⚠️ אין לי הרשאה לכתוב ליומן האישי שלך, אז לא נוצר כלום. "
-                             "כדי לאפשר: ב-Google Calendar במחשב ← היומן האישי ← הגדרות ושיתוף ← בחשבון study-bot שנה ל\"ביצוע שינויים באירועים\". "
-                             "אחר כך לחץ אשר שוב.", [[("✅ אשר", f"pp|ok|{pid}"), ("✖️ בטל", f"pp|no|{pid}")]])
+                             "אפשר ללחוץ \"להוסיף בעצמי\" (נפתח ב-Google עם הכול מוכן), או לתת הרשאה: ב-Google Calendar במחשב ← היומן האישי ← "
+                             "הגדרות ושיתוף ← בחשבון study-bot שנה ל\"ביצוע שינויים באירועים\", ואז אשר שוב.", rows)
                 return "אין הרשאת כתיבה ליומן האישי"
             self.tg.edit(p["mid"], head + f"⚠️ נכשל: {str(e)[:120]}. אפשר ללחוץ אשר שוב.",
                          [[("✅ אשר", f"pp|ok|{pid}"), ("✖️ בטל", f"pp|no|{pid}")]])
@@ -1487,12 +1609,20 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 {"action":"marathon_start","date":"YYYY-MM-DD"}   הזזת תחילת המרתון
 {"action":"attendance","course":"...","date":"YYYY-MM-DD","status":"present|absent|reserve"}   נוכחות בשיעור. absent = לא הגיע. reserve = מילואים (לא נספר כהיעדרות)
 {"action":"note","text":"..."}           כל מידע אחר שכדאי לזכור
+{"action":"cancel_proposal","id":"id מתוך pending_proposals"}   ביטול הצעה שעוד מחכה לאישור (למשל כשעודד מתקן בה פרט, ואז שולחים הצעה חדשה)
 {"action":"personal","op":"move|delete|create","event":"id מתוך personal_events (ל-move/delete)","start":"YYYY-MM-DDTHH:MM","end":"YYYY-MM-DDTHH:MM או null","title":"רק ל-create","location":"ל-create, אם ידוע","description":"ל-create, פרטים נוספים בקצרה"}
     ל-create של יום שלם (בלי שעה): {"action":"personal","op":"create","all_day":true,"date":"YYYY-MM-DD","title":"..."}
     שינוי ביומן האישי. זו רק הצעה: עודד יקבל כפתור אישור. השתמש בזה רק כשעודד ביקש במפורש לשנות/לבטל/להוסיף אירוע אישי,
     אף פעם ביוזמתך. ב-move בלי end נשמר אותו משך. אם לא ברור לאיזה אירוע הוא מתכוון, שאל ב-reply.
 
 כללים:
+- שיחה: אתה מקבל גם את השיחה האחרונה בצ'אט. הודעה קצרה או חלקית ("18:00", "באותו יום", "כן", "גם את זה") היא המשך
+  של מה שנאמר קודם: השלם ממנה את הפרטים שחסרו. אם בהודעה הקודמת הבוט שאל שאלה, ההודעה הנוכחית היא כנראה התשובה,
+  ועכשיו אפשר לבצע את הבקשה המקורית. הודעה אחת יכולה להכיל כמה בקשות (שתי הודעות רצופות מגיעות מאוחדות בשורות נפרדות).
+- אל תציע שוב משהו שכבר ב-pending_proposals או כבר ב-personal_events. אם עודד מתקן פרט בהצעה שממתינה:
+  cancel_proposal להצעה הישנה ו-personal חדש.
+- personal עם op=create: תמלא תמיד end. אם לא נאמרה שעת סיום: חתונה, בר/בת מצווה, אירוע ערב או מסיבה = 4 שעות;
+  ארוחה = שעתיים; פגישה, תור או סידור = שעה. ב-reply כתוב ששעת הסיום משוערת. בלי שעת התחלה בכלל (רק "בערב") = שאל באיזו שעה.
 - אם recap_context פעיל ועודד מתאר שיעורים, צור recap לכל קורס שהזכיר, בתאריך של recap_context.
 - תאריכים יחסיים ("מחר", "ביום רביעי") מחשבים מ-now.
 - אם משהו לא ברור, אל תנחש פעולה: שאל ב-reply ו-actions ריק.

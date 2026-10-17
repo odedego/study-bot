@@ -58,10 +58,10 @@ class Telegram:
         """שגיאות רשת של requests כוללות את ה-URL, ובו הטוקן. הלוגים של repo ציבורי גלויים, אז מוחקים אותו."""
         return RuntimeError(str(e).replace(self.token, "***") if self.token else str(e))
 
-    def _call(self, method: str, **params):
+    def _call(self, method: str, _timeout: int = TIMEOUT, **params):
         def go():
             try:
-                r = requests.post(f"{self.base}/{method}", json=params, timeout=TIMEOUT)
+                r = requests.post(f"{self.base}/{method}", json=params, timeout=_timeout)
             except requests.RequestException as e:
                 raise self._safe(e) from None
             _check(r, f"telegram {method}")
@@ -85,10 +85,13 @@ class Telegram:
     def _markup(buttons):
         if not buttons:
             return None
-        return {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]}
+        return {"inline_keyboard": [[{"text": t, "url": d} if d.startswith("https://") else {"text": t, "callback_data": d}
+                                     for t, d in row] for row in buttons]}
 
-    def get_updates(self, offset: int) -> list[dict]:
-        return self._call("getUpdates", offset=offset, timeout=0, allowed_updates=["message", "callback_query"])
+    def get_updates(self, offset: int, timeout: int = 0) -> list[dict]:
+        """timeout > 0 = long polling: טלגרם מחזיר מיד כשמגיעה הודעה, או ריק אחרי timeout שניות."""
+        return self._call("getUpdates", _timeout=TIMEOUT + timeout, offset=offset, timeout=timeout,
+                          allowed_updates=["message", "callback_query"])
 
     def send(self, text: str, buttons=None, chat_id: str | None = None) -> int:
         p = {"chat_id": chat_id or self.chat_id, "text": text[:4000], "disable_web_page_preview": True}

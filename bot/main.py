@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time as _time
 from datetime import datetime, timedelta
 
 from bot import adapters as A
@@ -33,6 +34,20 @@ def build(require_chat=True):
 
 
 ACTIVE_HOURS = (7, 23)   # שעון ישראל. בלילה הבוט לא עושה כלום (מה שנכתב בלילה מטופל ב-07:00)
+# אחרי העבודה הרגילה, כל הרצה נשארת "להקשיב" לטלגרם (long polling) עד כ-35 שניות מתחילתה.
+# כך תגובה לכפתור או להודעה מגיעה תוך שניות ברוב הדקה, במקום לחכות להרצה הבאה.
+LISTEN_UNTIL_S = 35
+
+
+def annotate(lines: list[str]):
+    """שורות הלוג כ-notice של GitHub: נקראות דרך ה-API גם כשאי אפשר להוריד את הלוג המלא (לאבחון מרחוק).
+    בלי תוכן אישי: רק סוגי פעולות, ספירות ושגיאות."""
+    keep = [l for l in lines if not l.startswith("updates: 0 ")]
+    if not keep or not os.environ.get("GITHUB_ACTIONS"):
+        return
+    msg = "\n".join(l[:300] for l in keep[-40:])
+    msg = msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::notice title=study-bot::{msg}")
 
 
 def tick():
@@ -40,6 +55,7 @@ def tick():
     if not ACTIVE_HOURS[0] <= h < ACTIVE_HOURS[1] and env("FORCE_TICK") != "1":
         print(f"לילה ({h}:xx שעון ישראל): לא רץ")
         return
+    t0 = _time.monotonic()
     bot, *_ = build()
     bot.now = bot.now_fn()
     bot.load_state()   # אם זה נכשל: לא ממשיכים ולא שומרים כלום
@@ -48,10 +64,24 @@ def tick():
         if bot.tg.chat_id:
             bot.run_jobs()
             bot.after_deploy(env("GITHUB_SHA")[:7])
+            listen(bot, t0)
     finally:
         bot.save_state()
+        bot.log.append(f"run {(_time.monotonic() - t0):.0f}s")
         for line in bot.log:
             print(line[:300])
+        annotate(bot.log)
+
+
+def listen(bot, t0: float, until_s: float = LISTEN_UNTIL_S, clock=_time.monotonic):
+    """long polling עד until_s שניות מתחילת ההרצה. כל עדכון מטופל מיד ונשמר."""
+    while True:
+        left = int(until_s - (clock() - t0))
+        if left < 3 or not ACTIVE_HOURS[0] <= bot.now_fn().hour < ACTIVE_HOURS[1]:
+            return
+        bot.now = bot.now_fn()
+        bot._personal = bot._pers_raw = None   # שינויים ביומן מאז תחילת ההרצה
+        bot.handle_updates(timeout=min(25, left))
 
 
 def check():
