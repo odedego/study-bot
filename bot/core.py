@@ -1016,7 +1016,10 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin):
             return
         b["deployed"] = sha
         try:
-            self.tg.send(self.health_text(f"🔧 עדכון לבוט עלה ({sha}). בדיקת חיבורים:"))
+            text = self.health_text(f"🔧 עדכון לבוט עלה ({sha}). בדיקת חיבורים:")
+            self.log.append("health: " + " | ".join(l.split(":")[0] if l.startswith("✅") else l[:120]
+                                                     for l in text.split("\n")[1:]))
+            self.tg.send(text)
         except Exception as e:  # noqa: BLE001
             self.log.append(f"after_deploy: {e}")
 
