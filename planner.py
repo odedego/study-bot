@@ -930,7 +930,7 @@ def diff(plan: dict, existing_events: list[dict], now: datetime | None = None) -
 
 # ---------------------------------------------------------------- state helpers
 def new_state() -> dict:
-    return {"version": 1, "updated": None, "pins": [], "sessions": [], "recaps": [], "assignments": [],
+    return {"version": 1, "updated": None, "pins": [], "sessions": [], "recaps": [], "assignments": [], "tasks": [],
             "course_kind": {c: COURSES[c]["kind"] for c in COURSE_ORDER}, "pending_questions": [], "runs": [],
             "notified": {}, "acked": [], "archive": {}, "archived_keys": []}
 
@@ -1024,6 +1024,8 @@ def compact_state(st: dict, now: datetime):
     st["recaps"] = [r for r in st.get("recaps", []) if r.get("date", "") >= (now.date() - timedelta(days=45)).isoformat()]
     st["assignments"] = [a for a in st.get("assignments", []) if a.get("status") != "done"
                          or (a.get("due") or "9999") >= (now.date() - timedelta(days=14)).isoformat()]
+    old = (now.date() - timedelta(days=14)).isoformat()
+    st["tasks"] = [t for t in st.get("tasks", []) if t.get("status") == "open" or (t.get("done_at") or "9999")[:10] >= old]
     st["runs"] = st.get("runs", [])[-30:]
 
 
