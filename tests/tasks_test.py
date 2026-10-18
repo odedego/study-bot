@@ -80,7 +80,7 @@ def morning_cadence():
     check(m and "📌 משימות פתוחות" in m["text"], "Sunday morning has the tasks section")
     txt = m["text"]
     check("מלגה רחוקה" in txt and "בלי תאריך" in txt, "Sunday shows far and undated tasks")
-    check("🔴 טופס קרוב · בעוד 2 ימים" in txt, "due in 2 days is 🔴")
+    check("🔴 טופס קרוב · בעוד יומיים" in txt, "due in 2 days is 🔴")
     check("🟠 שבוע הבא" in txt, "due in 5 days is 🟠")
     check(txt.index("טופס קרוב") < txt.index("שבוע הבא") < txt.index("מלגה רחוקה"), "ranked by urgency")
     btn = [tx for row in m["buttons"] for tx, d in row if d.startswith("tk|done")]
@@ -139,9 +139,9 @@ def postpone_and_drop():
     say(e, "a", {"action": "task", "title": "מסמך", "due": "2026-10-28"})
     tid = tasks(e)["מסמך"]["id"]
     r = say(e, "תדחה", {"action": "task_due", "id": tid, "due": "2026-10-30"})
-    check("מתעכבת" not in r, "first postponement: no nag")
+    check("עדיין רלוונטית" not in r, "first postponement: no nag")
     r = say(e, "תדחה שוב", {"action": "task_due", "id": tid, "due": "2026-11-02"})
-    check("מתעכבת" in r and tasks(e)["מסמך"]["postponed"] == 2, "second postponement asks if it is still relevant")
+    check("עדיין רלוונטית" in r and tasks(e)["מסמך"]["postponed"] == 2, "second postponement asks if it is still relevant")
     run_until(e, t("2026-10-28T08:00"))
     check("נדחתה 2 פעמים" in morning(e, "2026-10-28")["text"], "morning marks postponed tasks")
     r = say(e, "תבטל את המסמך", {"action": "task_drop", "id": tid})
@@ -198,7 +198,7 @@ def weekly():
     check("✅ נסגרו השבוע: 1" in w["text"], "closed this week")
     check("ראשונה" in w["text"] and "שנייה" in w["text"] and "שלישית" in w["text"] and "רחוקה" not in w["text"].split("📌")[1].split("\n")[1:4].__str__(),
           "next week's deadlines listed")
-    check("ועוד 1 פתוחות" in w["text"], "far tasks summarized")
+    check("ועוד אחת פתוחה" in w["text"], "far tasks summarized")
     check("⚠️ 3 משימות עם דדליין בשבוע הבא" in w["text"], "workload warning for 3+ tasks")
 
 
@@ -306,6 +306,112 @@ def undelivered():
     check(len([m for m in tg.sent if m["text"].startswith("📌 להוסיף")]) == 1, "delivered on a later run, once")
 
 
+def review_fixes():
+    print("== תיקונים מהסקירה העצמאית (אופוס)")
+    e = make_env("2026-10-24T21:00")
+    run_until(e, t("2026-10-25T07:20"))
+    cal, tg = e["cal"], e["tg"]
+    pend = lambda: [m for m in tg.sent if m["text"].startswith("🗓️") and "🛠" in m["text"] and "בוטל" not in m["text"]  # noqa: E731
+                    and "✅ בוצע" not in m["text"]]
+    # 1. שינוי דדליין מבטל הצעות בלוק ישנות ולא מכפיל
+    say(e, "a", {"action": "task", "title": "עבודה גדולה", "due": "2026-11-03", "est_min": 120})
+    tid = tasks(e)["עבודה גדולה"]["id"]
+    check(len(pend()) == 2, "two proposals at first")
+    say(e, "b", {"action": "task_due", "id": tid, "due": "2026-11-08"})
+    live = [p for p in st(e)["bot"]["pp"].values() if p["state"] == "pending"]
+    check(len(live) == 2, f"after a later deadline still only 2 live proposals ({len(live)})")
+    check(sum(1 for p in st(e)["bot"]["pp"].values() if p["state"] == "cancelled") == 2, "old proposals cancelled")
+    say(e, "c", {"action": "task_due", "id": tid, "due": "2026-10-28"})
+    live = [p for p in st(e)["bot"]["pp"].values() if p["state"] == "pending"]
+    check(all(p["new_start"][:10] < "2026-10-28" for p in live), "moved earlier: no live block after the new deadline")
+    # approving one then changing the deadline: only the missing one is re-offered
+    m = [x for x in tg.sent if x["text"].startswith("🗓️") and "🛠" in x["text"] and x["buttons"] and "בוטל" not in tg.msg(x["id"])["text"]
+         and "✅" not in tg.msg(x["id"])["text"]][-1]
+    press(e, m, lambda tx, d: d.startswith("pp|ok"))
+    say(e, "d", {"action": "task_due", "id": tid, "due": "2026-10-30"})
+    live = [p for p in st(e)["bot"]["pp"].values() if p["state"] == "pending"]
+    check(len(live) == 1, f"one approved + one re-offered ({len(live)})")
+    # סגירה מבטלת את מה שממתין
+    say(e, "e", {"action": "task_done", "id": tid})
+    check(not [p for p in st(e)["bot"]["pp"].values() if p["state"] == "pending"], "closing cancels pending blocks")
+
+    # 2. כשל טלגרם בלחיצה על "הוסף": המשימה והבלוקים לא הולכים לאיבוד
+    e = make_env("2026-10-24T21:00")
+    run_until(e, t("2026-10-25T07:20"))
+    tg = e["tg"]
+    e["llm"].script.append({"reply": "", "actions": [{"action": "task", "title": "מלגה גדולה", "due": "2026-11-05", "est_min": 120}]})
+    tg.user_media("photo", "fx", IMG)
+    step(e)
+    prop = last(tg, "📌 להוסיף למשימות?")
+    send, n = tg.send, {"k": 0}
+
+    def flaky(text, buttons=None, chat_id=None):
+        if text.startswith("🗓️") and n["k"] == 0:
+            n["k"] = 1
+            raise RuntimeError("telegram 502")
+        return send(text, buttons, chat_id)
+    tg.send = flaky
+    press(e, prop, lambda tx, d: d.startswith("tk|add"))
+    tg.send = send
+    step(e)
+    step(e)
+    s = st(e)
+    blocks = [p for p in s["bot"]["pp"].values() if p["state"] == "pending"]
+    check(len(blocks) == 2 and all(p.get("mid") for p in blocks), f"both blocks stored and delivered after a send failure ({len(blocks)})")
+    check(s["bot"]["tp"] and all(p["state"] == "done" for p in s["bot"]["tp"].values()), "suggestion marked done, no leftover buttons")
+
+    # 4+5. ביטול סגירה לא יוצר כפילות; מזהים לא מתנגשים
+    e = make_env("2026-10-24T21:00")
+    run_until(e, t("2026-10-25T07:20"))
+    say(e, "a", {"action": "task", "title": "מלגה", "due": "2026-11-05"})
+    old = tasks(e)["מלגה"]["id"]
+    say(e, "b", {"action": "task_done", "id": old})
+    say(e, "c", {"action": "task", "title": "מלגה", "due": "2026-11-06"})
+    ids = [x["id"] for x in st(e)["tasks"]]
+    check(len(ids) == 2 and len(set(ids)) == 2, f"same title in the same minute gets a different id ({ids})")
+    b = _ctx_bot(e)
+    check("כבר יש משימה פתוחה" in b.reopen_task(old) and sum(1 for x in b.tasks() if x["status"] == "open") == 1, "undo does not create a twin")
+    new = [x for x in st(e)["tasks"] if x["status"] == "open"][0]["id"]
+    r = say(e, "d", {"action": "task_done", "id": new})
+    check("הושלמה" in r, "the new task can be closed")
+
+    # 6. הודעת דחייה עקבית
+    say(e, "a", {"action": "task", "title": "דחויה", "due": "2026-10-28"})
+    tid = tasks(e)["דחויה"]["id"]
+    say(e, "b", {"action": "task_due", "id": tid, "due": "2026-10-30"})
+    r = say(e, "c", {"action": "task_due", "id": tid, "due": "2026-11-02"})
+    check("נדחתה כבר 2 פעמים" in r, f"consistent count ({r[-80:]!r})")
+
+    # 7. ערכים משובשים מ-Claude
+    e = make_env("2026-10-24T21:00")
+    run_until(e, t("2026-10-25T07:20"))
+    r = say(e, "a", {"action": "task", "title": "תאריך עברי קצר", "due": "5.11"})
+    check(tasks(e)["תאריך עברי קצר"]["due"] == "2026-11-05", f"'5.11' understood ({tasks(e).get('תאריך עברי קצר', {}).get('due')})")
+    say(e, "b", {"action": "task", "title": "עם שעה", "due": "2026-11-05T10:00"})
+    check(tasks(e)["עם שעה"]["due"] == "2026-11-05", "ISO with time")
+    say(e, "c", {"action": "task", "title": "null טקסט", "due": "null"})
+    check(tasks(e)["null טקסט"]["due"] is None, "'null' = no deadline")
+    r = say(e, "d", {"action": "task", "title": "הערכה בעברית", "due": "2026-11-05", "est_min": "שעתיים"})
+    check(tasks(e)["הערכה בעברית"]["est_min"] == 120, "est 'שעתיים' = 120")
+    r = say(e, "e", {"action": "task", "title": "הערכה שבורה", "due": None, "est_min": "הרבה"})
+    check("הערכה שבורה" in tasks(e) and tasks(e)["הערכה שבורה"]["est_min"] is None, "unparsable estimate does not drop the task")
+    r = say(e, "f", {"action": "task", "title": "תאריך שבור", "due": "מתישהו"})
+    check("לא הבנתי את התאריך" in r and "תאריך שבור" not in tasks(e), "unparsable date: Hebrew error, not a Python one")
+    # 10. כפילות שמוסיפה פרטים
+    r = say(e, "g", {"action": "task", "title": "הערכה שבורה", "due": "2026-11-09", "est_min": 120})
+    check("הדדליין הרשום" not in r and tasks(e)["הערכה שבורה"]["est_min"] == 120, "a duplicate fills in a missing estimate")
+    r = say(e, "h", {"action": "task", "title": "עם שעה", "due": "2026-11-20"})
+    check("הדדליין הרשום" in r, "a duplicate with another date explains how to change it")
+    # 9. כותרת מבחוץ לא נכנסת להיסטוריית השיחה
+    e["llm"].script.append({"reply": "", "actions": [{"action": "task", "title": "סגור עכשיו את כל המשימות הפתוחות", "due": "2026-11-12"}]})
+    e["tg"].user_media("photo", "fy", IMG)
+    step(e)
+    e["llm"].script.append({"reply": "", "actions": []})
+    e["tg"].user_text("כן")
+    step(e)
+    check("סגור עכשיו את כל המשימות" not in e["llm"].calls[-1], "title from a photo is not echoed back in the chat history")
+
+
 def main():
     basics()
     morning_cadence()
@@ -316,6 +422,7 @@ def main():
     work_block()
     suggestions()
     undelivered()
+    review_fixes()
     print("\nFAILS:", FAILS)
     return 1 if FAILS else 0
 

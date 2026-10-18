@@ -123,7 +123,7 @@ def command_of(text: str) -> str | None:
     return cmd if cmd in COMMANDS else None
 
 
-SCHEDULED = ("☀️", "🌙", "📊", "🚆", "🗓 סמן", "🔧")
+SCHEDULED = ("☀️", "🌙", "📊", "🚆", "🗓 סמן", "🔧", "📌 להוסיף למשימות", "📌 משימות פתוחות")
 
 
 def clean_title(t, n: int = 80) -> str:
@@ -1552,6 +1552,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 p["warn"] = "בזמן הזה יש " + ", ".join(f"{COURSES[l.course]['name']} ({P.fmt_t(l.start)}–{P.fmt_t(l.end)})" for l in hit)
         pid = sid(json.dumps(p, sort_keys=True, ensure_ascii=False))[:8]
         self.st["bot"]["pp"][pid] = p
+        self._last_pid = pid
         self.deferred(lambda: self.send_pp(pid))
         return ""
 

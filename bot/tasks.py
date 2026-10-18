@@ -29,8 +29,13 @@ TP_TTL_H = 72                # הצעת משימה ממייל/תמונה שלא 
 KEEP_DONE_DAYS = 14
 
 
-def _tid(title: str, at: str) -> str:
-    return "t" + hashlib.sha1(f"{title}|{at}".encode()).hexdigest()[:6]
+def _tid(title: str, at: str, taken=()) -> str:
+    n = 0
+    while True:
+        i = "t" + hashlib.sha1(f"{title}|{at}|{n}".encode()).hexdigest()[:6]
+        if i not in taken:
+            return i
+        n += 1
 
 
 def _norm(s: str) -> str:
@@ -45,8 +50,50 @@ def _short(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _plural(n: int, one: str, many: str) -> str:
-    return one if n == 1 else f"{n} {many}"
+def _plural(n: int, one: str, many: str, two: str | None = None) -> str:
+    return one if n == 1 else (two if n == 2 and two else f"{n} {many}")
+
+
+_NULLS = ("", "null", "none", "אין", "-")
+_EST_WORDS = {"חצי שעה": 30, "שעה": 60, "שעתיים": 120, "שלוש שעות": 180}
+
+
+def parse_due(v, today: date) -> date | None:
+    """תאריך מ-Claude: ISO, ISO עם שעה, או "5.11" / "5/11/27". לא מובן = שגיאה בעברית (לא חריגה של פייתון)."""
+    if v is None or str(v).strip().lower() in _NULLS:
+        return None
+    s = str(v).strip()
+    try:
+        return date.fromisoformat(s[:10])
+    except ValueError:
+        pass
+    m = re.fullmatch(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?", s)
+    if m:
+        d, mo, y = int(m[1]), int(m[2]), m[3]
+        try:
+            if y:
+                return date(int(y) + (2000 if len(y) == 2 else 0), mo, d)
+            x = date(today.year, mo, d)
+            return x if x >= today else date(today.year + 1, mo, d)
+        except ValueError:
+            pass
+    raise ValueError("לא הבנתי את התאריך. כתוב אותו כך: 5.11")
+
+
+def parse_est(v) -> int | None:
+    """הערכת זמן בדקות. לא מובן = בלי הערכה (המשימה עצמה לא נפסלת)."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return int(v) if v > 0 else None
+    s = str(v).strip()
+    if s in _EST_WORDS:
+        return _EST_WORDS[s]
+    try:
+        n = int(float(s))
+        return n if n > 0 else None
+    except ValueError:
+        return None
 
 
 class TasksMixin:
@@ -84,21 +131,27 @@ class TasksMixin:
         title = clean_title(title, 80)
         if not title:
             raise ValueError("חסר שם למשימה")
-        d = None
-        if due:
-            d = date.fromisoformat(str(due)[:10])
-            if d < self.now.date():
-                raise ValueError("התאריך כבר עבר")
-        est = int(est_min) if est_min not in (None, "", 0) else None
+        d = parse_due(due, self.now.date())
+        if d and d < self.now.date():
+            raise ValueError("התאריך כבר עבר")
+        est = parse_est(est_min)
         for t in self.open_tasks():
             if _norm(t["title"]) == _norm(title):
+                notes = []
                 if d and not t.get("due"):
                     t["due"] = d.isoformat()
-                    return f"📌 המשימה כבר רשומה. הוספתי לה דדליין: {_dd(d)}."
-                return f"📌 המשימה כבר רשומה: {t['title']}"
+                    notes.append(f"הוספתי לה דדליין: {_dd(d)}")
+                elif d and self._due_of(t) != d:
+                    notes.append(f"הדדליין הרשום הוא {_dd(self._due_of(t))}. כדי לשנות כתוב \"דחה את {_short(t['title'], 20)} ל-...\"")
+                if est and not t.get("est_min"):
+                    t["est_min"] = est
+                    notes.append(f"רשמתי הערכת זמן: {est} דק'")
+                blk = self.maybe_task_time(t) if notes else ""
+                return f"📌 המשימה כבר רשומה: {t['title']}" + "".join(f"\n{x}" for x in notes) + (f"\n{blk}" if blk else "")
         if len(self.open_tasks()) >= MAX_OPEN:
             raise ValueError("יש כבר המון משימות פתוחות. סגור כמה לפני שמוסיפים")
-        t = {"id": _tid(title, P.iso(self.now)), "title": title, "due": d.isoformat() if d else None, "est_min": est,
+        t = {"id": _tid(title, P.iso(self.now), {x.get("id") for x in self.tasks()}), "title": title,
+             "due": d.isoformat() if d else None, "est_min": est,
              "status": "open", "added": P.iso(self.now), "postponed": 0}
         if source:
             t["source"] = source
@@ -110,12 +163,15 @@ class TasksMixin:
     def close_task(self, tid: str) -> str:
         t = self._task_by_id(tid)
         t["status"], t["done_at"] = "done", P.iso(self.now)
+        self._cancel_blocks(t, "המשימה הושלמה")
         return f"✅ משימה הושלמה: {t['title']}"
 
     def reopen_task(self, tid: str) -> str:
         t = self.find_task(tid)
         if not t or t.get("status") != "done":
             return "אין מה לפתוח מחדש"
+        if any(_norm(x["title"]) == _norm(t["title"]) for x in self.open_tasks()):
+            return "כבר יש משימה פתוחה באותו שם"
         t["status"] = "open"
         t.pop("done_at", None)
         return f"↩️ נפתחה מחדש: {t['title']}"
@@ -123,11 +179,14 @@ class TasksMixin:
     def drop_task(self, tid: str) -> str:
         t = self._task_by_id(tid)
         t["status"], t["done_at"] = "dropped", P.iso(self.now)
+        self._cancel_blocks(t, "המשימה בוטלה")
         return f"🗑 המשימה בוטלה: {t['title']}"
 
     def set_task_due(self, tid: str, due) -> str:
         t = self._task_by_id(tid)
-        d = date.fromisoformat(str(due)[:10])
+        d = parse_due(due, self.now.date())
+        if not d:
+            raise ValueError("חסר תאריך")
         if d < self.now.date():
             raise ValueError("התאריך כבר עבר")
         old = self._due_of(t)
@@ -136,9 +195,10 @@ class TasksMixin:
         if old and d > old:
             t["postponed"] = t.get("postponed", 0) + 1
             if t["postponed"] >= 2:
-                out += (f"\n⏳ זו כבר הפעם ה-{t['postponed'] + 1} שהמשימה מתעכבת. עדיין רלוונטית? "
+                out += (f"\n⏳ המשימה נדחתה כבר {t['postponed']} פעמים. עדיין רלוונטית? "
                         "אפשר גם לפרק אותה לצעד קטן, ואני אזכיר רק אותו.")
-        if t.get("est_min"):
+        if t.get("est_min") and d != old:
+            self._cancel_blocks(t, "הדדליין השתנה")
             t.pop("work_offered", None)
             note = self.maybe_task_time(t)
             if note:
@@ -147,7 +207,7 @@ class TasksMixin:
 
     def set_task_time(self, tid: str, est_min) -> str:
         t = self._task_by_id(tid)
-        t["est_min"] = int(est_min) if est_min not in (None, "", 0) else None
+        t["est_min"] = parse_est(est_min)
         out = f"📌 {t['title']}: כ-{t['est_min']} דק'" if t["est_min"] else f"📌 {t['title']}: בלי הערכת זמן"
         note = self.maybe_task_time(t)
         return out + (f"\n{note}" if note else "")
@@ -179,7 +239,11 @@ class TasksMixin:
         last = due - timedelta(days=1)
         if last < today:
             return ""
-        n = min(EXTRA_WEEKLY_MAX, math.ceil(int(est) / P.CONFIG["session_min"]))
+        pp = self.st["bot"]["pp"]
+        approved = sum(1 for pid in t.get("blocks", []) if pp.get(pid, {}).get("state") == "done")
+        n = min(EXTRA_WEEKLY_MAX, math.ceil(int(est) / P.CONFIG["session_min"])) - approved
+        if n <= 0:
+            return ""
         held = [(datetime.fromisoformat(p["new_start"]), datetime.fromisoformat(p["new_end"]))
                 for p in self.st["bot"]["pp"].values()
                 if p.get("state") == "pending" and p.get("op") == "create" and not p.get("all_day") and p.get("new_start")]
@@ -193,13 +257,33 @@ class TasksMixin:
             return f"📌 לא מצאתי זמן עבודה לפני {due.day}.{due.month}. המשימה תופיע בסיכומים."
         sent = 0
         for a, b in slots:
+            self._last_pid = None
             try:
                 self.propose_personal({"op": "create", "title": f"🛠 עבודה על: {t['title']}"[:100], "start": P.iso(a), "end": P.iso(b),
                                        "description": f"בלוק עבודה למשימה \"{t['title']}\" (דדליין {due.day}.{due.month})."})
+            except Exception as e:  # noqa: BLE001
+                # ValueError = ההצעה לא נוצרה. כשל בשליחה לטלגרם = ההצעה נשמרה ותישלח שוב בהרצה הבאה (resend_undelivered)
+                self.log.append(f"task block: {type(e).__name__}: {str(e)[:80]}")
+            if self._last_pid:
+                t.setdefault("blocks", []).append(self._last_pid)
                 sent += 1
-            except ValueError as e:
-                self.log.append(f"task block: {str(e)[:80]}")
         return f"🛠 שלחתי {_plural(sent, 'הצעה', 'הצעות')} לבלוק עבודה ביומן, לאישור." if sent else ""
+
+    def _cancel_blocks(self, t: dict, why: str):
+        """הצעות לבלוק עבודה שעוד מחכות לאישור מתבטלות כשהמשימה נסגרה, בוטלה או שהדדליין שלה השתנה.
+        בלוק שכבר אושר ונכנס ליומן נשאר שם (היומן האישי משתנה רק בידי עודד)."""
+        pp = self.st["bot"]["pp"]
+        for pid in t.get("blocks", []):
+            p = pp.get(pid)
+            if not p or p.get("state") != "pending":
+                continue
+            p["state"] = "cancelled"
+            if p.get("mid"):
+                try:
+                    self.tg.edit(p["mid"], self._pp_text(p) + f"\n\n✖️ בוטל ({why}). לא נגעתי ביומן.")
+                except Exception as e:  # noqa: BLE001
+                    self.log.append(f"cancel block edit: {type(e).__name__}")
+        t["blocks"] = [pid for pid in t.get("blocks", []) if pp.get(pid, {}).get("state") == "done"]
 
     # ------------------------------------------------------------ ranking and display
     def _rank(self, t: dict, today: date):
@@ -218,7 +302,7 @@ class TasksMixin:
         else:
             n = (d - today).days
             if n < 0:
-                mark, tail = "🔴", "באיחור " + _plural(-n, "יום", "ימים")
+                mark, tail = "🔴", "באיחור " + _plural(-n, "יום", "ימים", "יומיים")
             elif absolute:
                 mark, tail = ("🔴" if n <= RED_DAYS else "🟠" if n <= FAR_DAYS else "⚪"), _dd(d)
             elif n == 0:
@@ -226,7 +310,7 @@ class TasksMixin:
             elif n == 1:
                 mark, tail = "🔴", "מחר"
             elif n <= RED_DAYS:
-                mark, tail = "🔴", f"בעוד {n} ימים"
+                mark, tail = "🔴", "בעוד יומיים"
             elif n <= FAR_DAYS:
                 mark, tail = "🟠", f"{_dd(d)} (בעוד {n} ימים)"
             else:
@@ -303,7 +387,9 @@ class TasksMixin:
             lines.append(f"(ועוד {len(soon) - 8} עם דדליין בשבוע הבא)")
         if later:
             nodate = sum(1 for t in later if not self._due_of(t))
-            lines.append(f"ועוד {len(later)} פתוחות" + (f" ({nodate} בלי דדליין)" if nodate else "") + ". כתוב \"משימות\" לרשימה.")
+            lines.append(("ועוד אחת פתוחה" if len(later) == 1 else f"ועוד {len(later)} פתוחות")
+                         + (f" ({nodate} בלי דדליין)" if nodate and len(later) > 1 else " (בלי דדליין)" if nodate else "")
+                         + ". כתוב \"משימות\" לרשימה.")
         in_week = [t for t in soon if self._due_of(t) >= nxt]
         if len(in_week) >= 3:
             exams = [x for x in SEM.upcoming_exams(today) if x[2] <= 14]
@@ -334,18 +420,19 @@ class TasksMixin:
         title = clean_title(a.get("title"), 80)
         if not title:
             raise ValueError("חסר שם למשימה")
-        d = None
-        if a.get("due"):
-            d = date.fromisoformat(str(a["due"])[:10])
-            if d < self.now.date():
-                return ""
+        try:
+            d = parse_due(a.get("due"), self.now.date())
+        except ValueError:
+            d = None                      # תאריך לא מובן: מציעים בלי דדליין, עודד יוסיף אותו
+        if d and d < self.now.date():
+            return ""
         if any(_norm(t["title"]) == _norm(title) for t in self.open_tasks()):
             return ""
         tp = self.st["bot"].setdefault("tp", {})
         if any(p.get("state") == "pending" and _norm(p["title"]) == _norm(title) for p in tp.values()):
             return ""
-        est = int(a["est_min"]) if a.get("est_min") else None
-        tid = _tid(title, P.iso(self.now))
+        est = parse_est(a.get("est_min"))
+        tid = _tid(title, P.iso(self.now), set(tp))
         tp[tid] = {"title": title, "due": d.isoformat() if d else None, "est_min": est, "source": source,
                    "state": "pending", "at": P.iso(self.now)}
         self.deferred(lambda: self._send_tp(tid))
@@ -381,9 +468,13 @@ class TasksMixin:
             if p.get("mid"):
                 self.tg.edit(p["mid"], self._tp_text(p) + f"\n\n⚠️ לא נוסף: {str(e)[:80]}")
             return "לא נוסף"
+        existed = msg.startswith("📌 המשימה כבר רשומה")
         p["state"] = "done"
-        if p.get("mid"):
-            self.tg.edit(p["mid"], self._tp_text(p) + "\n\n✅ נוסף למשימות.")
-        if "\n" in msg:
-            self.tg.send(msg.split("\n", 1)[1])      # למשל: נשלחה הצעה לבלוק עבודה
-        return "✅ נוסף"
+        try:
+            if p.get("mid"):
+                self.tg.edit(p["mid"], self._tp_text(p) + ("\n\nℹ️ כבר ברשימה." if existed else "\n\n✅ נוסף למשימות."))
+            if "\n" in msg:
+                self.tg.send(msg.split("\n", 1)[1])      # למשל: נשלחה הצעה לבלוק עבודה
+        except Exception as e:  # noqa: BLE001
+            self.log.append(f"tp reply: {type(e).__name__}")
+        return "ℹ️ כבר ברשימה" if existed else "✅ נוסף"

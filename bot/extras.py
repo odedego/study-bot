@@ -50,6 +50,12 @@ class ExtrasMixin:
                 for a, b in p["slots"]:
                     out.append(P.Session("xp", "extra", p.get("course"), [p.get("course")],
                                          datetime.fromisoformat(a), datetime.fromisoformat(b)))
+        # בלוקי עבודה למשימות שמחכים לאישור (יומן אישי): גם הם תופסים זמן
+        old = P.iso(self.now - timedelta(hours=24))
+        for p in self.st["bot"]["pp"].values():
+            if p.get("state") == "pending" and p.get("op") == "create" and not p.get("all_day") and p.get("new_start") \
+                    and p.get("at", "") >= old:
+                out.append(P.Session("pp", "extra", None, [None], datetime.fromisoformat(p["new_start"]), datetime.fromisoformat(p["new_end"])))
         return out
 
     def find_slots(self, n: int, first: date, last: date, course: str | None = None, days: list | None = None,
