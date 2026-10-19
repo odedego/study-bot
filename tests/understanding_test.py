@@ -417,8 +417,8 @@ def adapter():
         c = A.Claude("k", "m")
         out = c.complete("s", "u", 2000, tool={"type": "object"})
         check(json.loads(out) == {"actions": [], "reply": 'כל הסופ"ש'}, "tool input comes back as valid JSON, quote and all")
-        check(sent["tool_choice"] == {"type": "tool", "name": "respond"} and sent["tools"][0]["input_schema"] == {"type": "object"},
-              "request forces the tool")
+        check(sent["tool_choice"] == {"type": "auto"} and sent["tools"][0]["input_schema"] == {"type": "object"} and "respond" in sent["system"],
+              "request offers the tool and tells the model to use it (forced tool_choice is rejected by the live model)")
         check(sent["_timeout"] == 60, "normal request: 60s")
         c.complete("s", "u", 4000, tool={"type": "object"})
         check(sent["_timeout"] == 120, "a large output limit gets a longer timeout")

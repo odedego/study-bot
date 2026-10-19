@@ -322,7 +322,7 @@ class Claude:
     def complete(self, system: str, user: str, max_tokens: int = 800, media: dict | None = None,
                  tool: dict | None = None) -> str:
         """media = {"mime": "image/jpeg" | ... | "application/pdf", "data": base64}: תמונה או PDF לפני הטקסט.
-        tool = סכמת JSON: Claude חייב להחזיר דרך כלי מובנה, אז הפלט תמיד JSON תקין (אין גרש שבור באמצע), ומוחזר כמחרוזת JSON.
+        tool = סכמת JSON: Claude מתבקש להחזיר דרך כלי מובנה, אז הפלט JSON תקין (אין גרש שבור באמצע), ומוחזר כמחרוזת JSON.
         פלט שנחתך ב-max_tokens זורק Truncated (ולא נחשב כתשובה)."""
         content: list | str = user
         if media:
@@ -334,8 +334,11 @@ class Claude:
             body = {"model": self.model, "max_tokens": max_tokens, "system": system,
                     "messages": [{"role": "user", "content": content}]}
             if tool:
+                # "auto" ולא כפייה: המודל הנוכחי דוחה tool_choice מסוג tool/any (400). ההוראה במערכת גורמת לו לקרוא לכלי,
+                # ואם בכל זאת ענה בטקסט, הפענוח הרגיל (parse_plan) מטפל בזה
+                body["system"] = system + "\n\nהחזר את התשובה אך ורק בקריאה אחת לכלי respond, בלי טקסט מסביב."
                 body["tools"] = [{"name": "respond", "description": "החזר את התשובה במבנה הנדרש.", "input_schema": tool}]
-                body["tool_choice"] = {"type": "tool", "name": "respond"}
+                body["tool_choice"] = {"type": "auto"}
             r = requests.post("https://api.anthropic.com/v1/messages", timeout=120 if max_tokens > 2000 else 90 if media else 60, headers={
                 "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, json=body)
             _check(r, "claude")
