@@ -228,7 +228,7 @@ class FakeLLM:
         self.calls = []
         self.script = []  # רשימת תשובות JSON לפי הסדר
 
-    def complete(self, system, user, max_tokens=800, media=None):
+    def complete(self, system, user, max_tokens=800, media=None, tool=None):
         self.calls.append(user)
         self.media = getattr(self, "media", []) + [media]
         self.systems = getattr(self, "systems", []) + [system]

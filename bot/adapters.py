@@ -17,6 +17,10 @@ class Permanent(Exception):
     """שגיאה שאין טעם לנסות שוב (4xx)."""
 
 
+class Truncated(Permanent):
+    """הפלט של Claude נחתך באמצע (max_tokens). אין טעם לחזור על אותה בקשה בדיוק, צריך מגבלה גדולה יותר."""
+
+
 def _retry(fn, tries=3, wait=3):
     """מנסה שוב רק על תקלות רשת, 5xx ו-429. לא ישן אחרי הניסיון האחרון."""
     for i in range(tries):
@@ -315,8 +319,11 @@ class Claude:
     def __init__(self, api_key: str, model: str):
         self.key, self.model = api_key, model
 
-    def complete(self, system: str, user: str, max_tokens: int = 800, media: dict | None = None) -> str:
-        """media = {"mime": "image/jpeg" | ... | "application/pdf", "data": base64}: תמונה או PDF לפני הטקסט."""
+    def complete(self, system: str, user: str, max_tokens: int = 800, media: dict | None = None,
+                 tool: dict | None = None) -> str:
+        """media = {"mime": "image/jpeg" | ... | "application/pdf", "data": base64}: תמונה או PDF לפני הטקסט.
+        tool = סכמת JSON: Claude חייב להחזיר דרך כלי מובנה, אז הפלט תמיד JSON תקין (אין גרש שבור באמצע), ומוחזר כמחרוזת JSON.
+        פלט שנחתך ב-max_tokens זורק Truncated (ולא נחשב כתשובה)."""
         content: list | str = user
         if media:
             kind = "document" if media["mime"] == "application/pdf" else "image"
@@ -324,10 +331,21 @@ class Claude:
                        {"type": "text", "text": user}]
 
         def go():
+            body = {"model": self.model, "max_tokens": max_tokens, "system": system,
+                    "messages": [{"role": "user", "content": content}]}
+            if tool:
+                body["tools"] = [{"name": "respond", "description": "החזר את התשובה במבנה הנדרש.", "input_schema": tool}]
+                body["tool_choice"] = {"type": "tool", "name": "respond"}
             r = requests.post("https://api.anthropic.com/v1/messages", timeout=90 if media else 60, headers={
-                "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": self.model, "max_tokens": max_tokens, "system": system,
-                      "messages": [{"role": "user", "content": content}]})
+                "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, json=body)
             _check(r, "claude")
-            return "".join(b.get("text", "") for b in r.json().get("content", []))
+            data = r.json()
+            if data.get("stop_reason") == "max_tokens":
+                raise Truncated(f"claude: output cut at {max_tokens} tokens")
+            blocks = data.get("content", [])
+            if tool:
+                for b in blocks:
+                    if b.get("type") == "tool_use":
+                        return json.dumps(b.get("input") or {}, ensure_ascii=False)
+            return "".join(b.get("text", "") for b in blocks)
         return _retry(go, tries=2)

@@ -52,4 +52,8 @@ def run(tg, cal, feed, store, llm, cfg: dict, now: datetime) -> list[str]:
         return "יש מצב שמור" if store.load() else "ריק (ייטען מצב התחלתי)"
     step("Upstash", up)
     step("Claude", lambda: (llm.complete("ענה במילה אחת", "אמור: תקין", 10).strip() or "?") if llm else "לא הוגדר (כפתורים ופקודות בלבד)")
+    # פלט מובנה (כלי): אותו מנגנון שפענוח ההודעות משתמש בו
+    step("Claude (פלט מובנה)", lambda: ("תקין" if isinstance(__import__("json").loads(llm.complete(
+        "החזר דרך הכלי: ok=true", "בדיקה", 200, tool={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]})), dict)
+        else "?") if llm else "לא הוגדר")
     return res

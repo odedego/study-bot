@@ -1,0 +1,295 @@
+"""
+הבנת הודעות חופשיות: בלי "קיבלתי." שקט. פלט מובנה, ניסיון חוזר, כשלים כנים, שורת "מה קרה", הפקודה "למה",
+שאלות הסבר, אירועים רב-יומיים וקיבולת לטווח ימים. כולל התרחישים מצילומי המסך (חיפה, החתונה).
+הרצה: python3 -m tests.understanding_test
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from datetime import date, datetime, timedelta
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import planner as P  # noqa: E402
+from bot import adapters as A  # noqa: E402
+from bot.core import Bot  # noqa: E402
+from tests.fakes import FakeLLM  # noqa: E402
+from tests.features_test import bot_of, last, make_env, press, run_until, st, step, t  # noqa: E402
+
+PERS = "me@cal"
+IMG = b"\xff\xd8" + b"x" * 3000
+FAILS: list[str] = []
+
+
+def check(c, m):
+    print(("  PASS " if c else "  FAIL ") + m)
+    if not c:
+        FAILS.append(m)
+
+
+class Seq(FakeLLM):
+    """תשובות לפי הסדר: dict = JSON, מחרוזת = טקסט גולמי, חריגה = כשל. אחרי שנגמרו: תשובה ריקה."""
+    def __init__(self, *items):
+        super().__init__()
+        self.items, self.kw = list(items), []
+
+    def complete(self, system, user, max_tokens=800, media=None, tool=None):
+        self.calls.append(user)
+        self.kw.append({"max_tokens": max_tokens, "tool": tool})
+        it = self.items.pop(0) if self.items else {"actions": [], "reply": ""}
+        if isinstance(it, Exception):
+            raise it
+        return it if isinstance(it, str) else json.dumps(it, ensure_ascii=False)
+
+
+def env(*items, start="2026-10-24T21:00", until="2026-10-25T07:20"):
+    e = make_env(start)
+    e["llm"] = Seq(*items)
+    run_until(e, t(until))
+    return e
+
+
+def say(e, text):
+    """התשובה לאחר ההודעה (ההצעות לאישור נשלחות אחריה)."""
+    n = len(e["tg"].sent)
+    e["tg"].user_text(text)
+    b = step(e)
+    return e["tg"].sent[n]["text"], b
+
+
+def ai(e):
+    return st(e)["bot"].get("last_ai", {})
+
+
+def failures():
+    print("== כשלים של Claude: בכולם הודעה כנה, לא \"קיבלתי.\"")
+    bad_json = '{"actions":[],"reply":"הבנתי: כל הסופ"ש בחיפה. מה לרשום?"}'
+    good = {"actions": [], "reply": "הבנתי: כל הסופ\"ש בחיפה. מה לרשום?"}
+    e = env(bad_json, good)
+    r, b = say(e, 'כל הסופ"ש הבא אני בחיפה')
+    check("הבנתי" in r and "קיבלתי" not in r, f"unparsable first answer is retried ({r[:40]!r})")
+    check(len(e["llm"].calls) == 2 and "החזר שוב דרך הכלי" in e["llm"].calls[1] and "החזר שוב" not in e["llm"].calls[0], "retry carries a note")
+    check(any("unparsable" in l for l in b.log), "failure reason logged")
+    check(all(k["tool"] and k["max_tokens"] >= 2000 for k in e["llm"].kw), "structured tool + 2000+ tokens on every call")
+
+    e = env(A.Truncated("cut"), {"actions": [], "reply": "בסדר, הבנתי"})
+    r, b = say(e, "תסביר")
+    check("הבנתי" in r and e["llm"].kw[1]["max_tokens"] == 2 * e["llm"].kw[0]["max_tokens"], "truncated: retry with a doubled limit")
+
+    e = env(A.Truncated("cut"), A.Truncated("cut"))
+    r, b = say(e, "הודעה ארוכה")
+    check("לא הצלחתי לפענח" in r and "שמרתי" in r and "קיבלתי" not in r, f"truncated twice: honest message ({r[:50]!r})")
+    check(ai(e)["status"] == "truncated" and any("truncated" in l for l in b.log), "status and log")
+    check(st(e)["bot"]["notes"][-1]["text"] == "הודעה ארוכה", "message kept as a note")
+
+    e = env("זה לא JSON בכלל", "גם לא זה")
+    r, b = say(e, "משהו")
+    check("לא הצלחתי לפענח" in r and ai(e)["status"] == "parse", "unparsable twice: honest message")
+
+    e = env({"actions": [], "reply": ""}, {"actions": [], "reply": ""})
+    r, b = say(e, "בלה בלה")
+    check("לא הבנתי מה לעשות" in r and "קיבלתי" not in r and ai(e)["status"] == "empty", f"empty twice ({r[:40]!r})")
+    check(any("empty plan" in l for l in b.log), "empty plan logged")
+
+    e = env({"actions": [], "reply": ""}, {"actions": [], "reply": "לא ברור לי איזה יום. חמישי הקרוב?"})
+    r, b = say(e, "בחמישי")
+    check("חמישי הקרוב" in r, "empty first, useful second")
+
+    e = env(A.Permanent("claude: 400 tools not supported"), {"actions": [], "reply": "הבנתי, ממשיך בלי כלי"})
+    r, b = say(e, "שלום")
+    check("ממשיך בלי כלי" in r and e["llm"].kw[0]["tool"] and e["llm"].kw[1]["tool"] is None and any("tool rejected" in l for l in b.log),
+          "tool request rejected (4xx): falls back to plain text and still answers")
+    e = env(A.Permanent("claude: 401 bad key"), A.Permanent("claude: 401 bad key"))
+    r, b = say(e, "שלום")
+    check("לא הצלחתי לפענח אותה עכשיו" in r and ai(e)["status"] == "error", "a real auth failure is reported, not hidden")
+
+    e = env(RuntimeError("claude: 529"))
+    r, b = say(e, "שלום")
+    check("לא הצלחתי לפענח אותה עכשיו" in r and ai(e)["status"] == "error" and len(e["llm"].calls) == 1, "Claude down: saved, no pointless retry")
+
+    e = env({"actions": [], "reply": ""}, {"actions": [], "reply": ""})
+    e["tg"].user_media("photo", "f", IMG, caption="זה מה?")
+    step(e)
+    check("לא הצלחתי להוציא מהקובץ" in e["tg"].sent[-1]["text"], "photo with an empty answer: honest message")
+
+
+def outcome_line():
+    print("== בכל הודעה שורה שאומרת מה קרה")
+    e = env({"actions": [], "reply": "כרגע יש לך 3 חזרות כי היעד במתמטיקה הוא 3."})
+    r, _ = say(e, "למה 3 חזרות?")
+    check(r.endswith("ℹ️ לא שיניתי כלום.") and "היעד במתמטיקה" in r, "answer only: 'nothing changed'")
+    e = env({"actions": [{"action": "note", "text": "x"}], "reply": "רשמתי לעצמי"})
+    r, _ = say(e, "תזכור")
+    check("רשמתי הערה" in r, "note only")
+    e = env({"actions": [{"action": "personal", "op": "create", "title": "פגישה", "start": "2026-10-27T10:00", "end": "2026-10-27T11:00"}],
+             "reply": "הבנתי: פגישה"})
+    r, _ = say(e, "פגישה בשלישי ב-10")
+    check("📨 שלחתי הצעה אחת לאישור" in r and any(m["text"].startswith("🗓️") for m in e["tg"].sent[-2:]), "proposal only")
+    e = env({"actions": [{"action": "done", "id": "nope"}], "reply": ""})
+    r, _ = say(e, "עשיתי")
+    check("לא ביצעתי" in r and "ℹ️" not in r, "failed action shows its error, no extra line")
+    e = env({"actions": [{"action": "capacity", "date": "2026-10-29", "max_sessions": 0, "text": "x"}], "reply": ""})
+    r, _ = say(e, "ביום חמישי אין לי זמן")
+    check("השארתי" in r and "ℹ️ לא שיניתי" not in r, "executed action: its own result, no 'nothing changed'")
+    e = env({"actions": [], "reply": "מה קורה"})
+    say(e, "היי")
+    b = bot_of(e)
+    b.load_state()
+    b.st["bot"]["chat"] = [{"w": "u", "t": "מה קיבלת?", "at": P.iso(b.now)}, {"w": "b", "t": "קיבלתי.", "at": P.iso(b.now)},
+                           {"w": "b", "t": "כן, קיבלתי את הבקשה", "at": P.iso(b.now)}]
+    txt = b.chat_text()
+    check("כן, קיבלתי את הבקשה" in txt and txt.count("קיבלתי.") == 0 and "מה קיבלת?" in txt,
+          "old bare 'קיבלתי.' replies are not fed back to Claude")
+
+
+def why_command():
+    print("== הפקודה \"למה\"")
+    e = env()
+    e["tg"].user_text("למה?")
+    step(e)
+    check("עוד לא פענחתי" in e["tg"].sent[-1]["text"], "no message yet")
+    e = env({"actions": [{"action": "capacity", "date": "2026-10-29", "max_sessions": 0, "text": "x"},
+                         {"action": "personal", "op": "create", "title": "תור", "start": "2026-10-27T10:00", "end": "2026-10-27T11:00"}],
+             "reply": "הבנתי: חמישי פנוי"})
+    say(e, "ביום חמישי אין לי זמן ויש לי תור בשלישי")
+    e["tg"].user_text("למה")
+    step(e)
+    w = e["tg"].sent[-1]["text"]
+    check(w.startswith("🔍") and "ביום חמישי אין לי זמן" in w and "capacity 2026-10-29" in w and "✅ הובנה" in w, "shows the message, status and actions")
+    check("מה קרה:" in w and "נשלחה הצעה אחת לאישור" in w, "shows what happened")
+    check(ai(e)["text"].startswith("ביום חמישי"), "command does not overwrite the last analysis")
+    for cmd in ("מה עשית", "/why", "מה הבנת?"):
+        e["tg"].user_text(cmd)
+        step(e)
+        check(e["tg"].sent[-1]["text"].startswith("🔍"), f"'{cmd}' works")
+    e = env(A.Truncated("x"), A.Truncated("x"))
+    say(e, "ארוך")
+    e["tg"].user_text("למה")
+    step(e)
+    check("התשובה נחתכה" in e["tg"].sent[-1]["text"], "failure status is shown")
+
+
+def health_check():
+    print("== בדיקת חיבורים כוללת את הפלט המובנה")
+    e = env()
+    b = bot_of(e)
+    b.load_state()
+    txt = b.health_text("🔧")
+    check("✅ Claude (פלט מובנה): תקין" in txt, "health lists the structured-output step")
+
+
+def explain_context():
+    print("== שאלות הסבר: עובדות התכנון בהקשר")
+    e = env()
+    b = bot_of(e)
+    b.load_state()
+    ctx = json.loads(b.context_for_llm())
+    check(ctx["weekly_targets"]["math"] == 3 and ctx["course_kind"]["math"] == "cumulative", "weekly targets and course kind")
+    check("11 סשנים" in ctx["planning_rules"] and "kind=review" in ctx["planning_rules"], "planning rules")
+    rev = [s for s in ctx["sessions"] if s.get("kind") == "review"]
+    check(rev and all(s.get("lesson_day") for s in rev), f"each review session says which lesson it repeats ({len(rev)} sessions)")
+    check(ctx["last_lesson_end"] and all(len(v) == 5 for v in ctx["last_lesson_end"].values()), "last lesson end per day")
+    sysmsg = Bot.__module__ and __import__("bot.core", fromlist=["LLM_SYSTEM"]).LLM_SYSTEM
+    check("שאלת \"למה\"" in sysmsg and "לעולם לא reply ריק" in sysmsg, "prompt asks for an explanation and a non-empty reply")
+
+
+def multi_day():
+    print("== אירוע רב-יומי, קיבולת לטווח, \"אחרי הלימודים\" (התרחיש של חיפה)")
+    e = env()
+    b = bot_of(e)
+    b.load_state()
+    ctx = json.loads(b.context_for_llm())
+    thu = next(d for d in sorted(ctx["last_lesson_end"]) if date.fromisoformat(d).weekday() == 3 and d > "2026-10-25")
+    end = ctx["last_lesson_end"][thu]
+    fri, sat = (date.fromisoformat(thu) + timedelta(days=i) for i in (1, 2))
+    e["llm"] = Seq({"reply": "הבנתי: חיפה בסופ\"ש, ובחמישי נסיעה אחרי הלימודים", "actions": [
+        {"action": "personal", "op": "create", "title": "נסיעה לחיפה", "start": f"{thu}T{end}", "end": f"{thu}T{int(end[:2]) + 2}:{end[3:]}"},
+        {"action": "personal", "op": "create", "all_day": True, "date": fri.isoformat(), "end_date": sat.isoformat(), "title": "בחיפה"},
+        {"action": "capacity", "date": thu, "to": sat.isoformat(), "max_sessions": 0, "text": "חיפה"}]})
+    r, _ = say(e, 'כל הסופ"ש הבא אני בחיפה, תקשום לי ביומן שאני צריך לנסוע אחרי הלימודים בחמישי')
+    props = [m for m in e["tg"].sent if m["text"].startswith("🗓️")]
+    check(len(props) == 2, f"two proposals ({len(props)})")
+    multi = next(m for m in props if "בחיפה»" in m["text"])
+    check("מ-" in multi["text"] and "עד" in multi["text"] and "כל הימים" in multi["text"], f"multi-day wording ({multi['text'][-60:]!r})")
+    trip = next(m for m in props if "נסיעה" in m["text"])
+    check(end in trip["text"], f"trip starts at the last lesson's end ({end})")
+    cap = st(e).get("capacity", {})
+    check(set(cap) == {thu, fri.isoformat()} and all(v == 0 for v in cap.values()), f"capacity 0 for Thu and Fri, not Saturday ({sorted(cap)})")
+    check("רשמתי: אין סשנים ב-2 ימים" in r, "range summarised in one line")
+    check(not e["cal"].cals.get(PERS), "nothing written to the personal calendar yet")
+    press(e, multi, lambda tx, d: d.startswith("pp|ok"))
+    ev = list(e["cal"].cals[PERS].values())[0]
+    check(ev["start"] == {"date": fri.isoformat()} and ev["end"] == {"date": (sat + timedelta(days=1)).isoformat()},
+          f"approval creates one all-day event Fri–Sat (end exclusive): {ev['start']} {ev['end']}")
+    for bad, why in (({"end_date": "2026-10-20"}, "end before start"), ({"end_date": "2026-12-30"}, "over 30 days")):
+        e["llm"].items.append({"reply": "", "actions": [dict({"action": "personal", "op": "create", "all_day": True, "date": "2026-11-02",
+                                                               "title": "x"}, **bad)]})
+        r, _ = say(e, "אירוע")
+        check("לא ביצעתי" in r, f"rejected: {why}")
+    e["llm"].items.append({"reply": "", "actions": [{"action": "capacity", "date": "2026-10-26", "to": "2026-12-30", "max_sessions": 0}]})
+    r, _ = say(e, "מילואים")
+    check("לא ביצעתי" in r and "טווח" in r, "capacity range over 14 days rejected")
+
+
+def adapter():
+    print("== Claude.complete: כלי מובנה וחיתוך (בלי רשת)")
+    sent = {}
+
+    class R:
+        def __init__(self, data):
+            self.status_code, self.data = 200, data
+
+        def json(self):
+            return self.data
+
+    def post_ok(url, timeout, headers, json):  # noqa: A002
+        sent.update(json)
+        return R({"stop_reason": "tool_use", "content": [{"type": "text", "text": "ignored"},
+                                                        {"type": "tool_use", "name": "respond", "input": {"actions": [], "reply": 'כל הסופ"ש'}}]})
+
+    real = A.requests.post
+    try:
+        A.requests.post = post_ok
+        c = A.Claude("k", "m")
+        out = c.complete("s", "u", 2000, tool={"type": "object"})
+        check(json.loads(out) == {"actions": [], "reply": 'כל הסופ"ש'}, "tool input comes back as valid JSON, quote and all")
+        check(sent["tool_choice"] == {"type": "tool", "name": "respond"} and sent["tools"][0]["input_schema"] == {"type": "object"},
+              "request forces the tool")
+        A.requests.post = lambda *a, **k: R({"stop_reason": "end_turn", "content": [{"type": "text", "text": "טקסט"}]})
+        check(c.complete("s", "u") == "טקסט", "no tool: plain text as before")
+        A.requests.post = lambda *a, **k: R({"stop_reason": "max_tokens", "content": [{"type": "tool_use", "input": {"actions": [{"ac": 1}]}}]})
+        try:
+            c.complete("s", "u", 800, tool={"type": "object"})
+            ok = False
+        except A.Truncated:
+            ok = True
+        check(ok, "output cut at max_tokens raises Truncated (not retried as a network error)")
+    finally:
+        A.requests.post = real
+
+
+def parse_unit():
+    print("== parse_plan")
+    p = Bot.parse_plan
+    check(p('בטח!\n```json\n{"actions":[],"reply":"אוקיי"}\n```')["reply"] == "אוקיי", "fenced JSON with text around it")
+    check(p('{"actions":"x","reply":5}') == {"actions": [], "reply": "5"}, "bad shapes are normalised")
+    check(p('{"actions":[1,"a",{"action":"note"}],"reply":null}')["actions"] == [{"action": "note"}], "non-dict actions dropped")
+    check(p("[1,2]") is None and p("") is None and p(None) is None and p("{oops") is None, "garbage = None")
+
+
+def main():
+    failures()
+    outcome_line()
+    why_command()
+    health_check()
+    explain_context()
+    multi_day()
+    adapter()
+    parse_unit()
+    print("\nFAILS:", FAILS)
+    return 1 if FAILS else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

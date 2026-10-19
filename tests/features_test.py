@@ -38,10 +38,10 @@ def t(s):
 class FlakyLLM(FakeLLM):
     down = False
 
-    def complete(self, system, user, max_tokens=800, media=None):
+    def complete(self, system, user, max_tokens=800, media=None, tool=None):
         if self.down:
             raise RuntimeError("claude: 529")
-        return super().complete(system, user, max_tokens, media)
+        return super().complete(system, user, max_tokens, media, tool)
 
 
 def make_env(start, state=None):
