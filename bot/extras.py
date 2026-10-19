@@ -12,6 +12,7 @@ import math
 from datetime import date, datetime, time, timedelta
 
 import planner as P
+from bot.tasks import parse_due
 
 EXTRA_KINDS = ("extra", "assign")
 EXTRA_WEEKLY_MAX = 2
@@ -264,6 +265,55 @@ class ExtrasMixin:
         return ""
 
     # ------------------------------------------------------------ capacity ("מחר רק סשן אחד" / "מחר פנוי")
+    def capacity_action(self, a: dict) -> str:
+        """הפעולה capacity מ-Claude: יום אחד או טווח (עד 14 יום). מנרמלת את הקלט ומחזירה הודעה אחת וברורה."""
+        today = self.now.date()
+        free = a.get("free_day") in (True, "true", "True", 1)
+        n = None
+        raw = a.get("max_sessions")
+        if not free and raw is not None and str(raw).strip().lower() not in ("", "null", "none"):
+            try:
+                n = int(float(str(raw).strip()))
+            except ValueError:
+                raise ValueError("לא הבנתי כמה סשנים. כתוב מספר, למשל 0 או 1") from None
+            if n < 0:
+                raise ValueError("מספר הסשנים לא יכול להיות שלילי")
+            n = min(n, P.CONFIG["day_total_max"])
+        d0 = parse_due(a.get("date"), today)
+        if d0 is None:
+            raise ValueError("חסר תאריך")
+        d1 = parse_due(a.get("to"), today) if a.get("to") else None
+        if d1 is None or d1 == d0:
+            return self.apply_capacity(d0.isoformat(), n, free, a.get("text", ""))
+        if d1 < d0 or (d1 - d0).days > 13:
+            raise ValueError("טווח הימים לא סביר (עד 14 יום)")
+        first = max(d0, today)
+        if first > d1:
+            raise ValueError("התאריכים כבר עברו")
+        every = [first + timedelta(days=i) for i in range((d1 - first).days + 1)]   # כולל שבת
+        rng = f"{_dd(every[0])}–{_dd(every[-1])}"
+        if n is None and not free:
+            self.st["pending_questions"].append({"id": f"cap-{first.isoformat()}", "text": f"קיבולת {rng}: {a.get('text', '')}",
+                                                 "asked": P.iso(self.now)})
+            return "📌 רשמתי. תגיד לי כמה סשנים אתה יכול בימים האלה, ואסדר לפי זה."
+        if n is not None:
+            # קודם לכל הימים בטווח, כדי שהזזת עודף מיום אחד לא תנחת על יום אחר שעודד כבר פינה
+            for d in every:
+                self.st.setdefault("capacity", {})[d.isoformat()] = n
+        outs = [self.apply_capacity(d.isoformat(), n, free, a.get("text", "")) for d in every
+                if d.weekday() not in P.CONFIG["closed_weekdays"]]
+        span = "פנוי" if free else "אין סשנים" if n == 0 else f"עד {n} סשנים"
+        head = f"👍 רשמתי: {span} ב-{len(every)} ימים ({rng})."
+        notes: list[str] = []
+        for o in outs:
+            if not o:
+                continue
+            if "בהודעת הבוקר" in o:
+                notes.append("⚠️ כרגע אני לא מצליח לקרוא את המערכת, אז אזיז את העודף בהודעת הבוקר.")
+            elif not o.startswith("👍 רשמתי"):
+                notes.append(o)
+        return "\n".join([head] + list(dict.fromkeys(notes))[:6])
+
     def apply_capacity(self, d: str, max_sessions, free_day: bool, text: str) -> str:
         day = date.fromisoformat(d)
         if day < self.now.date():
@@ -313,7 +363,7 @@ class ExtrasMixin:
                 s["status"] = "missed"
                 s["note"] = f"פינית את {_dd(day)}."
                 moving.append(s["key"])
-            elif s.get("kind") in EXTRA_KINDS:
+            elif s.get("kind") != "marathon":      # תוספות, מטלות, חזרה שבועית: מזיזים ליום פנוי אחר
                 alt = self.find_slots(1, day + timedelta(days=1), day + timedelta(days=5), s.get("course"), budget=False)
                 if alt:
                     a, b = alt[0]

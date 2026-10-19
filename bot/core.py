@@ -112,7 +112,7 @@ class _GuardedCal:
 PP_TTL_H = 24  # הצעה לשינוי ביומן האישי פגה אחרי יממה
 CHAT_KEEP = 16       # כמה הודעות אחרונות נשמרות כהקשר לשיחה
 CHAT_HOURS = 12      # ולא ישנות מזה
-LLM_RETRY_NOTE = "\n\n(הניסיון הקודם לא החזיר תשובה שמישה. החזר שוב דרך הכלי, עם reply קצר בעברית שאומר מה הבנת.)"
+LLM_RETRY_NOTE = "\n\n(הניסיון הקודם לא החזיר תשובה שמישה. החזר שוב באותו מבנה (actions ו-reply), עם reply קצר בעברית שאומר מה הבנת.)"
 LLM_TOOL = {"type": "object",
             "properties": {"actions": {"type": "array", "items": {"type": "object", "properties": {"action": {"type": "string"}},
                                                                     "required": ["action"], "additionalProperties": True}},
@@ -129,7 +129,7 @@ def command_of(text: str) -> str | None:
     return cmd if cmd in COMMANDS else None
 
 
-SCHEDULED = ("☀️", "🌙", "📊", "🚆", "🗓 סמן", "🔧", "📌 להוסיף למשימות", "📌 משימות פתוחות")
+SCHEDULED = ("☀️", "🌙", "📊", "🚆", "🗓 סמן", "🔧", "📌 להוסיף למשימות", "📌 משימות פתוחות", "🔍 ההודעה האחרונה")
 
 
 def clean_title(t, n: int = 80) -> str:
@@ -1087,6 +1087,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         if not self.authorized(chat):
             return
         cmd = command_of(text) or ""
+        if cmd == "למה" and not self.recent_ai(30):
+            cmd = ""         # "למה?" בלי הודעה אחרונה שפוענחה = שאלה על משהו אחר, ל-Claude (עם ההיסטוריה)
         if cmd:
             self.remember("u", text)
         today = self.now.date()
@@ -1213,6 +1215,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                                                  "due": a.get("due"), "est_min": a.get("est_min")}
                                                 for a in self.st["assignments"] if a.get("status") != "done"],
                            "open_tasks": self.tasks_for_llm(),
+                           "recent_notes": [f"{n.get('at', '')[:10]}: {clean_title(n.get('text'), 140)}" for n in self.st["bot"]["notes"][-5:]],
                            "weekly_targets": {c: P.target_of(c, self.st) for c in COURSES},
                            "course_kind": {c: self.st["course_kind"].get(c) for c in COURSES},
                            "planning_rules": PLANNING_RULES,
@@ -1223,7 +1226,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
     # ------------------------------------------------------------ Claude: פענוח הודעה לפעולות
     @staticmethod
     def parse_plan(raw) -> dict | None:
-        """תשובת Claude כ-dict עם actions (רשימת dict) ו-reply (מחרוזת). לא ניתן לפענוח = None."""
+        """תשובת Claude כ-dict עם actions (רשימת dict עם action) ו-reply (מחרוזת). לא ניתן לפענוח = None.
+        plan["dropped"] = כמה פעולות פגומות הושמטו (כדי שלא ייעלמו בשקט)."""
         raw = (raw or "").strip()
         obj = None
         for cand in (raw, (re.search(r"\{.*\}", raw, re.S) or [None])[0] if raw else None):
@@ -1237,7 +1241,22 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         if not isinstance(obj, dict):
             return None
         acts = obj.get("actions")
-        obj["actions"] = [x for x in acts if isinstance(x, dict)] if isinstance(acts, list) else []
+        if isinstance(acts, str):       # קורה: הרשימה הגיעה כמחרוזת JSON
+            if not acts.strip():
+                acts = []
+            else:
+                try:
+                    acts = json.loads(acts)
+                except (json.JSONDecodeError, TypeError):
+                    return None
+        if isinstance(acts, dict):
+            acts = [acts]
+        if acts is None:
+            acts = []
+        if not isinstance(acts, list):
+            return None
+        good = [x for x in acts if isinstance(x, dict) and isinstance(x.get("action"), str) and x["action"]]
+        obj["actions"], obj["dropped"] = good, len(acts) - len(good)
         obj["reply"] = str(obj.get("reply") or "").strip()
         return obj
 
@@ -1254,10 +1273,11 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 self.log.append(f"llm: truncated (try {attempt})")
                 continue
             except Permanent as e:
-                if not use_tool:
+                if not use_tool or "tool" not in str(e).lower():
+                    # שגיאה שלא קשורה לכלי (מפתח, מודל, קובץ גדול מדי): אין טעם לנסות שוב
                     self.log.append(f"llm: {type(e).__name__}: {str(e)[:150]}")
                     return None, "error"
-                # הבקשה עם הכלי נדחתה (4xx): חוזרים לפלט טקסט רגיל, כדי שהודעות ימשיכו להיענות
+                # הכלי עצמו נדחה (4xx שמזכיר tool): חוזרים לפלט טקסט רגיל, כדי שהודעות ימשיכו להיענות
                 use_tool = False
                 self.log.append(f"llm: tool rejected, falling back to text ({str(e)[:100]})")
                 continue
@@ -1273,6 +1293,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 status = "empty"
                 self.log.append(f"llm: empty plan (try {attempt})")
                 continue
+            if plan.get("dropped"):
+                self.log.append(f"llm: dropped {plan['dropped']} malformed actions")
             return plan, "ok"
         return None, status
 
@@ -1282,13 +1304,24 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         return clean_title(" ".join(str(a[k]) for k in keys if a.get(k) not in (None, "", False)), 110)
 
     def record_ai(self, text: str, status: str, plan: dict | None = None, results: list[str] | None = None, props: int = 0,
-                  media: bool = False):
-        """מה הבוט הבין מההודעה האחרונה ומה עשה (לפקודה "למה"). רק מההודעה של עודד, לא מתוכן חיצוני."""
+                  media: bool = False, blocked: set | None = None):
+        """מה הבוט הבין מההודעה האחרונה ומה עשה (לפקודה "מה עשית"). רק מההודעה של עודד, לא מתוכן חיצוני."""
+        acts = []
+        for i, a in enumerate((plan or {}).get("actions", [])[:12]):
+            acts.append(self.act_summary(a) + (" ✖️ נחסם (פעולה שהגיעה מקובץ)" if i in (blocked or ()) else ""))
         self.st["bot"]["last_ai"] = {
-            "at": P.iso(self.now), "text": clean_title(("[קובץ] " if media else "") + text, 200), "status": status,
-            "reply": clean_title((plan or {}).get("reply"), 160),
-            "actions": [self.act_summary(a) for a in (plan or {}).get("actions", [])[:12]],
+            "at": P.iso(self.now), "text": clean_title(("(קובץ) " if media else "") + text, 200), "status": status,
+            "reply": clean_title((plan or {}).get("reply"), 160), "actions": acts,
             "results": [clean_title(r.split("\n")[0], 110) for r in (results or [])[:8]], "props": props}
+
+    def recent_ai(self, minutes: int) -> bool:
+        ai = self.st["bot"].get("last_ai")
+        if not ai:
+            return False
+        try:
+            return self.now - datetime.fromisoformat(ai["at"]) <= timedelta(minutes=minutes)
+        except (KeyError, ValueError, TypeError):
+            return False
 
     @staticmethod
     def last_lesson_ends(uni, today: date, days: int = 14) -> dict:
@@ -1301,7 +1334,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
 
     def free_text(self, text: str, media: dict | None = None):
         if not self.llm:
-            self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": text})
+            self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": clean_title(text, 300)})
             self.tg.send("רשמתי. (בלי מפתח Claude אני מבין רק כפתורים ופקודות: /today /tomorrow /week)")
             return
         hist = self.chat_text()
@@ -1310,6 +1343,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             system, prompt = LLM_SYSTEM + MEDIA_RULES, f"הקשר:\n{self.context_for_llm()}{hist}\n\nהכיתוב של עודד לקובץ:\n{text}"
         else:
             system, prompt = LLM_SYSTEM, f"הקשר:\n{self.context_for_llm()}{hist}\n\nההודעה של עודד:\n{text}"
+        # ההודעה נכנסת להיסטוריית השיחה בכל מקרה, גם כשהפענוח נכשל: ככה "מה קיבלת?" בהמשך עובד
+        self.remember("u", (f"[{'PDF' if media['mime'] == 'application/pdf' else 'תמונה'}] " if media else "") + text)
         plan, status = self.ask_plan(system, prompt, media)
         if plan is None:
             self.record_ai(text, status, media=bool(media))
@@ -1317,63 +1352,78 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 if media:
                     self.tg.send("לא הצלחתי לקרוא את הקובץ עכשיו. נסה לשלוח אותו שוב עוד כמה דקות.")
                     return
-                self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": text})
+                self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": clean_title(text, 300)})
                 self.tg.send("שמרתי את ההודעה, אבל לא הצלחתי לפענח אותה עכשיו. נסה שוב עוד מעט או השתמש בכפתורים.")
             elif media:
                 self.tg.send("לא הצלחתי להוציא מהקובץ משהו שאפשר לרשום. נסה לשלוח תמונה ברורה יותר, או כתוב לי מה לרשום.")
             elif status == "empty":
-                self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": text})
+                self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": clean_title(text, 300)})
                 self.tg.send("לא הבנתי מה לעשות עם ההודעה הזו, ולא שיניתי כלום. אפשר לנסח אחרת? למשל: \"ביום חמישי אין לי זמן ללמוד\". "
-                             "(כתוב \"למה\" כדי לראות מה הבנתי.)")
+                             "(כתוב \"מה עשית\" כדי לראות מה הבנתי.)")
             else:
-                self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": text})
+                self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": clean_title(text, 300)})
                 self.tg.send("לא הצלחתי לפענח את ההודעה, ולא שיניתי כלום. שמרתי אותה כהערה. נסה לנסח אותה בקצרה, או כתוב \"עזרה\". "
-                             "(כתוב \"למה\" כדי לראות מה קרה.)")
+                             "(כתוב \"מה עשית\" כדי לראות מה קרה.)")
             return
-        self.remember("u", (f"[{'PDF' if media['mime'] == 'application/pdf' else 'תמונה'}] " if media else "") + text)
-        done, ran = [], []
+        done, ran, blocked = [], [], set()
         self._defer = []
-        for a in plan["actions"][:12]:
+        for i, a in enumerate(plan["actions"][:12]):
             if media and not (a.get("action") in MEDIA_ACTIONS and (a.get("action") != "personal" or a.get("op") == "create")):
                 # טקסט בתוך תמונה הוא מידע, לא הוראה: מקובץ מותר רק להציע הוספה, לרשום מטלה או הערה
                 self.log.append(f"media: blocked action {a.get('action')}/{a.get('op')}")
+                blocked.add(i)
                 continue
+            queued, self._silent_ok = len(self._defer), False
             try:
                 # משימה שמגיעה מקובץ היא הצעה בלבד (כפתור "הוסף"); מהודעה של עודד עצמו היא נרשמת מיד
                 r = self.suggest_task(a, "תמונה או קובץ") if media and a.get("action") == "task" else self.apply_action(a)
-                ran.append(a.get("action"))
+                if r or len(self._defer) > queued or self._silent_ok:
+                    ran.append(a.get("action"))      # נספר רק מה שבאמת עשה משהו
                 if r:
                     done.append(r)
             except Exception as e:  # noqa: BLE001
-                done.append(f"⚠️ לא ביצעתי {a.get('action')}: {str(e)[:80]}")
+                done.append(f"⚠️ לא ביצעתי {clean_title(a.get('action'), 30)}: {str(e)[:80]}")
+        if plan.get("dropped"):
+            done.append(f"⚠️ דילגתי על {plan['dropped']} פעולות שלא הבנתי.")
+        if blocked:
+            done.append("⚠️ מקובץ אני מציע רק הוספת אירוע או משימה, אז דילגתי על " +
+                        ("פעולה אחת." if len(blocked) == 1 else f"{len(blocked)} פעולות."))
         props = len(self._defer or [])
         lines = ([plan["reply"]] if plan["reply"] else []) + done
-        if not done:
+        tail = ""
+        if not [d for d in done if not d.startswith("⚠️")]:
             # בכל הודעה חופשית יש שורה שאומרת מה קרה בפועל, כדי שלא תישאר הודעה בלי תוצאה ברורה
             if props:
-                lines.append(("📨 שלחתי הצעה אחת לאישור." if props == 1 else f"📨 שלחתי {props} הצעות לאישור.") + " עד שתאשר לא שיניתי כלום.")
+                tail = ("📨 שלחתי הצעה אחת לאישור." if props == 1 else f"📨 שלחתי {props} הצעות לאישור.") + " עד שתאשר לא שיניתי כלום."
             elif ran and set(ran) <= {"note"}:
-                lines.append("ℹ️ רשמתי הערה. לא שיניתי כלום בתוכנית.")
+                tail = "ℹ️ רשמתי הערה. לא שיניתי כלום בתוכנית."
+            elif "cancel_proposal" in ran and set(ran) <= {"note", "cancel_proposal"}:
+                tail = "ℹ️ ביטלתי את ההצעה שחיכתה לאישור."
             elif ran:
-                lines.append("ℹ️ בוצע.")
+                tail = "ℹ️ בוצע."
             else:
-                lines.append("ℹ️ לא שיניתי כלום.")
-        self.record_ai(text, "ok", plan, done, props, media=bool(media))
+                tail = "ℹ️ לא שיניתי כלום."
+        body = "\n".join(lines)
+        room = 3900 - len(tail) - 2
+        if len(body) > room:      # טלגרם חותך ב-4000: השורה האחרונה (מה קרה) חייבת לשרוד
+            body = body[:max(0, room - 1)].rstrip() + "…"
+        self.record_ai(text, "ok", plan, done, props, media=bool(media), blocked=blocked)
         try:
-            self.tg.send("\n".join(lines))
+            self.tg.send("\n".join(x for x in (body, tail) if x))
         finally:
             queue, self._defer = self._defer or [], None
         for fn in queue:
             fn()
 
     def why_text(self) -> str:
-        """הפקודה "למה": מה הבוט הבין מההודעה החופשית האחרונה ומה עשה בפועל."""
+        """הפקודה "מה עשית": מה הבוט הבין מההודעה החופשית האחרונה ומה עשה בפועל."""
         ai = self.st["bot"].get("last_ai")
         if not ai:
             return "עוד לא פענחתי הודעה חופשית ממך."
         label = {"ok": "✅ הובנה", "empty": "❔ לא הבנתי מה לעשות", "parse": "⚠️ לא הצלחתי לפענח", "truncated": "⚠️ התשובה נחתכה (ארוכה מדי)",
                  "error": "❌ Claude לא היה זמין"}.get(ai.get("status"), ai.get("status", ""))
-        lines = [f"🔍 ההודעה האחרונה שפענחתי ({ai['at'][11:16]}):", f"«{ai['text']}»", f"סטטוס: {label}"]
+        when = ai["at"][11:16] if ai["at"][:10] == self.now.date().isoformat() else f"{ai['at'][8:10]}.{ai['at'][5:7]} {ai['at'][11:16]}"
+        lines = [f"🔍 ההודעה האחרונה שפענחתי ({when}):", f"«{ai['text']}»", f"סטטוס: {label}"]
         if ai.get("actions"):
             lines += ["", "מה הבנתי:"] + [f"• {x}" for x in ai["actions"]]
         elif ai.get("status") == "ok":
@@ -1467,24 +1517,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             self.restore(s)
             return f"↩️ הוחזר: {strip_marks(P._session_from_state(s).title())}"
         if act == "capacity":
-            if not a.get("to"):
-                return self.apply_capacity(a.get("date") or "", a.get("max_sessions"), bool(a.get("free_day")), a.get("text", ""))
-            d0, d1 = date.fromisoformat(str(a.get("date"))[:10]), date.fromisoformat(str(a["to"])[:10])
-            if d1 < d0 or (d1 - d0).days > 13:
-                raise ValueError("טווח הימים לא סביר (עד 14 יום)")
-            days, outs = [], []
-            d = max(d0, self.now.date())
-            while d <= d1:
-                if d.weekday() not in P.CONFIG["closed_weekdays"]:
-                    days.append(d)
-                    outs.append(self.apply_capacity(d.isoformat(), a.get("max_sessions"), bool(a.get("free_day")), a.get("text", "")))
-                d += timedelta(days=1)
-            if not days:
-                return "בטווח הזה אין ימים רלוונטיים (שבת או ימים שעברו)."
-            n = a.get("max_sessions")
-            head = f"👍 רשמתי: {'אין סשנים' if n == 0 else f'עד {n} סשנים' if n is not None else 'קיבולת'} ב-{len(days)} ימים ({dd(days[0])}–{dd(days[-1])})."
-            extra = [o for o in outs if o and not o.startswith("👍 רשמתי")]
-            return "\n".join([head] + list(dict.fromkeys(extra))[:5])
+            return self.capacity_action(a)
         if act == "target":
             return self.set_target(a.get("course"), a.get("weekly"))
         if act == "extra":
@@ -1512,6 +1545,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             if not p or p.get("state") != "pending":
                 return ""
             p["state"] = "cancelled"
+            self._silent_ok = True
             if p.get("mid"):
                 try:
                     self.tg.edit(p["mid"], self._pp_text(p) + "\n\n✖️ הוחלף בהצעה מעודכנת.")
@@ -1519,7 +1553,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                     self.log.append(f"cancel edit: {type(e).__name__}")
             return ""
         if act == "note":
-            self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": a.get("text", "")})
+            self.st["bot"]["notes"].append({"at": P.iso(self.now), "text": clean_title(a.get("text"), 300)})
+            self._silent_ok = True
             return ""
         if act == "practice_exam":
             return self.mar_score(a.get("course"), a.get("score"), a.get("date"))
@@ -1531,7 +1566,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             return self.mar_set_need(a.get("course"), a.get("sessions"))
         if act == "marathon_start":
             return self.mar_set_start(a.get("date"))
-        return ""
+        raise ValueError("פעולה לא מוכרת")
 
     # ------------------------------------------------------------ exams & syllabus
     def exam_line(self, c: str, dt: datetime, days: int) -> str:
@@ -1610,9 +1645,16 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
     def pending_for_llm(self) -> list[dict]:
         """הצעות ליומן האישי שנשלחו ועוד מחכות לאישור: כדי לא להציע שוב, ולדעת מה מחליפים כשעודד מתקן."""
         old = P.iso(self.now - timedelta(hours=PP_TTL_H))
-        return [{"id": pid, "op": p["op"], "title": p.get("title", ""), "start": (p.get("new_start") or p.get("old_start") or "")[:16],
-                 "end": (p.get("new_end") or "")[:16]}
-                for pid, p in self.st["bot"]["pp"].items() if p.get("state") == "pending" and p.get("at", "") >= old]
+        out = []
+        for pid, p in self.st["bot"]["pp"].items():
+            if p.get("state") != "pending" or p.get("at", "") < old:
+                continue
+            end = (p.get("new_end") or "")[:16]
+            if p.get("all_day") and end:      # ביום שלם new_end הוא היום שאחרי האחרון; ל-Claude מציגים את היום האחרון עצמו
+                end = (date.fromisoformat(end[:10]) - timedelta(days=1)).isoformat()
+            out.append({"id": pid, "op": p["op"], "title": p.get("title", ""), "all_day": bool(p.get("all_day")),
+                        "start": (p.get("new_start") or p.get("old_start") or "")[:16], "end": end})
+        return out
 
     def personal_for_llm(self) -> list[dict]:
         out = []
@@ -1685,7 +1727,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 last_day = date.fromisoformat(str(a["end_date"])[:10])
                 if last_day < day:
                     raise ValueError("תאריך הסיום לפני תאריך ההתחלה")
-                if (last_day - day).days > 30:
+                if (last_day - day).days > 29:
                     raise ValueError("יותר מ-30 ימים ברצף. אותו כדאי שתוסיף בעצמך")
             p.update(all_day=True, new_start=day.isoformat(), new_end=(last_day + timedelta(days=1)).isoformat())
         elif op in ("move", "create"):
@@ -1877,7 +1919,7 @@ HELP = """אני בוט הלימודים שלך 📚
 "מחר רק סשן אחד" · "מחר פנוי כל היום" · "מחר אני במילואים"
 "מילואים 3.1–10.1" · "מבחן תרגול במבוא 85" · "במרתון תן למשפט 8"
 "כל הסופ"ש בחיפה" · "בחמישי אני נוסע אחרי הלימודים" · "למה קבעת 3 חזרות במתמטיקה?"
-"למה" (או "מה עשית") מראה מה הבנתי מההודעה האחרונה ומה עשיתי בפועל.
+"מה עשית" (או "מה הבנת") מראה מה הבנתי מההודעה החופשית האחרונה ומה עשיתי בפועל.
 משימות פתוחות: "תוסיף משימה: להירשם למלגה, עד 5.11" · "סיימתי עם המלגה" · "משימות". הן מופיעות בבוקר ובסיכום השבועי, עם כפתור ✅.
 
 תוספות (רק באישור ✅, עד 2 בשבוע מעבר ל-11): חיזוק אחרי ריקאפ בציון 1–2, זמן עבודה למטלה של שעה ומעלה, תרגול ביום פנוי.
@@ -1952,6 +1994,7 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
   אירוע רב-יומי לשישי-שבת, ו-capacity 0 לימים שלא פנוי בהם.
 - תמיד כתוב ב-reply משפט שאומר מה הבנת. אם אין פעולות, ב-reply תשובה לשאלה או שאלה למה שחסר. לעולם לא reply ריק יחד עם actions ריק.
 - הודעה של הבוט בשיחה שהיא רק "קיבלתי." היא תקלה ישנה, לא תשובה לחקות.
+- recent_notes = הודעות קודמות של עודד שנשמרו כהערה כי לא הצלחתי לפענח אותן. אם ההודעה הנוכחית משלימה או מתקנת אחת מהן, פעל לפיה.
 - שאלת "למה" על סשן או על התוכנית ("למה קבעת 3 חזרות במתמטיקה?"): הסבר ב-2-3 משפטים מתוך sessions (kind, lesson_day, note),
   weekly_targets, course_kind ו-planning_rules. אל תמציא סיבה שאין בהקשר: אם אינך יודע, אמור זאת. אל תשנה כלום אלא אם ביקש.
 - אם משהו לא ברור, אל תנחש פעולה: שאל ב-reply ו-actions ריק.

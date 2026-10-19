@@ -51,9 +51,26 @@ def run(tg, cal, feed, store, llm, cfg: dict, now: datetime) -> list[str]:
             raise RuntimeError("UPSTASH_URL לא הוגדר")
         return "יש מצב שמור" if store.load() else "ריק (ייטען מצב התחלתי)"
     step("Upstash", up)
-    step("Claude", lambda: (llm.complete("ענה במילה אחת", "אמור: תקין", 10).strip() or "?") if llm else "לא הוגדר (כפתורים ופקודות בלבד)")
+
+    def claude_ping():
+        if not llm:
+            return "לא הוגדר (כפתורים ופקודות בלבד)"
+        from bot.adapters import Truncated
+        try:
+            return llm.complete("ענה במילה אחת", "אמור: תקין", 10).strip() or "?"
+        except Truncated:
+            return "מגיב"      # הפלט נחתך במגבלה הקטנה של הבדיקה: החיבור עצמו תקין
+    step("Claude", claude_ping)
+
     # פלט מובנה (כלי): אותו מנגנון שפענוח ההודעות משתמש בו
-    step("Claude (פלט מובנה)", lambda: ("תקין" if isinstance(__import__("json").loads(llm.complete(
-        "החזר דרך הכלי: ok=true", "בדיקה", 200, tool={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]})), dict)
-        else "?") if llm else "לא הוגדר")
+    def claude_tool():
+        if not llm:
+            return "לא הוגדר"
+        import json
+        out = json.loads(llm.complete("החזר דרך הכלי: ok=true", "בדיקה", 200,
+                                      tool={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}))
+        if not isinstance(out, dict):
+            raise RuntimeError("הכלי לא החזיר אובייקט")
+        return "תקין"
+    step("Claude (פלט מובנה)", claude_tool)
     return res

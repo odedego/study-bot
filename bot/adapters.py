@@ -336,7 +336,7 @@ class Claude:
             if tool:
                 body["tools"] = [{"name": "respond", "description": "החזר את התשובה במבנה הנדרש.", "input_schema": tool}]
                 body["tool_choice"] = {"type": "tool", "name": "respond"}
-            r = requests.post("https://api.anthropic.com/v1/messages", timeout=90 if media else 60, headers={
+            r = requests.post("https://api.anthropic.com/v1/messages", timeout=120 if max_tokens > 2000 else 90 if media else 60, headers={
                 "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, json=body)
             _check(r, "claude")
             data = r.json()

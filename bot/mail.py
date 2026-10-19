@@ -31,6 +31,14 @@ MAIL_SYSTEM = """אתה מסכם מיילים מהאוניברסיטה עבור 
 החזר JSON בלבד, עם פריט לכל מייל שקיבלת:
 {"items":[{"id":"...","important":true,"summary":"...","actions":[...]}]}"""
 MAX_TRIES = 3
+MAIL_TOOL = {"type": "object",
+             "properties": {"items": {"type": "array", "items": {
+                 "type": "object",
+                 "properties": {"id": {"type": "string"}, "important": {"type": "boolean"}, "summary": {"type": "string"},
+                                "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}}},
+                 "required": ["id", "important"], "additionalProperties": True}}},
+             "required": ["items"]}
+
 
 class MailMixin:
     def process_mail(self) -> list[str]:
@@ -79,7 +87,7 @@ class MailMixin:
             return [f"📧 {len(items)} מיילים מהאוניברסיטה (בלי מפתח Claude אני לא מסכם):"] + \
                 [f"• {clean_title(m['subject'], 70)}" for m in items[:8]]
         try:
-            raw_ans = self.llm.complete(MAIL_SYSTEM, f"הקשר:\n{self.context_for_llm()}\n\nהמיילים:\n{json.dumps(items, ensure_ascii=False)}", 2500)
+            raw_ans = self._mail_ask(f"הקשר:\n{self.context_for_llm()}\n\nהמיילים:\n{json.dumps(items, ensure_ascii=False)}")
             mm = re.search(r"\{.*\}", raw_ans, re.S)
             plan = json.loads(mm.group(0)) if mm else {}
         except Exception as e:  # noqa: BLE001
@@ -135,6 +143,23 @@ class MailMixin:
         if other_note:
             out.append(other_note)
         return out + notes
+
+    def _mail_ask(self, prompt: str) -> str:
+        """סיכום המיילים דרך פלט מובנה (תמיד JSON תקין). חיתוך = ניסיון שני עם מגבלה כפולה. הכלי נדחה = חוזרים לטקסט."""
+        from bot.adapters import Permanent, Truncated
+        tokens, use_tool = 4000, True
+        for _ in range(3):
+            try:
+                return self.llm.complete(MAIL_SYSTEM, prompt, tokens, tool=MAIL_TOOL if use_tool else None)
+            except Truncated:
+                tokens *= 2
+                self.log.append("mail llm: truncated")
+            except Permanent as e:
+                if not (use_tool and "tool" in str(e).lower()):
+                    raise
+                use_tool = False
+                self.log.append("mail llm: tool rejected, falling back to text")
+        raise RuntimeError("mail llm: no usable answer")
 
     def ack_mail(self):
         """אחרי שהודעת הבוקר נשמרה: מוחקים מהתור את הרצף שבתחילתו שטופל. מה שלא טופל נשאר למחר

@@ -69,7 +69,7 @@ def failures():
     e = env(bad_json, good)
     r, b = say(e, 'כל הסופ"ש הבא אני בחיפה')
     check("הבנתי" in r and "קיבלתי" not in r, f"unparsable first answer is retried ({r[:40]!r})")
-    check(len(e["llm"].calls) == 2 and "החזר שוב דרך הכלי" in e["llm"].calls[1] and "החזר שוב" not in e["llm"].calls[0], "retry carries a note")
+    check(len(e["llm"].calls) == 2 and "החזר שוב באותו מבנה" in e["llm"].calls[1] and "החזר שוב" not in e["llm"].calls[0], "retry carries a note")
     check(any("unparsable" in l for l in b.log), "failure reason logged")
     check(all(k["tool"] and k["max_tokens"] >= 2000 for k in e["llm"].kw), "structured tool + 2000+ tokens on every call")
 
@@ -102,7 +102,8 @@ def failures():
           "tool request rejected (4xx): falls back to plain text and still answers")
     e = env(A.Permanent("claude: 401 bad key"), A.Permanent("claude: 401 bad key"))
     r, b = say(e, "שלום")
-    check("לא הצלחתי לפענח אותה עכשיו" in r and ai(e)["status"] == "error", "a real auth failure is reported, not hidden")
+    check("לא הצלחתי לפענח אותה עכשיו" in r and ai(e)["status"] == "error" and len(e["llm"].calls) == 1,
+          "a real auth failure is reported at once, no pointless second request")
 
     e = env(RuntimeError("claude: 529"))
     r, b = say(e, "שלום")
@@ -128,7 +129,27 @@ def outcome_line():
     check("📨 שלחתי הצעה אחת לאישור" in r and any(m["text"].startswith("🗓️") for m in e["tg"].sent[-2:]), "proposal only")
     e = env({"actions": [{"action": "done", "id": "nope"}], "reply": ""})
     r, _ = say(e, "עשיתי")
-    check("לא ביצעתי" in r and "ℹ️" not in r, "failed action shows its error, no extra line")
+    check("לא ביצעתי" in r and r.endswith("ℹ️ לא שיניתי כלום."), "failed action shows its error, then says nothing changed")
+    e = env({"actions": [{"action": "dance"}], "reply": "רקדתי"})
+    r, _ = say(e, "רקוד")
+    check("פעולה לא מוכרת" in r and "ℹ️ בוצע" not in r and r.endswith("ℹ️ לא שיניתי כלום."), f"unknown action is an error, not 'done' ({r[-60:]!r})")
+    e = env({"actions": [{"action": "cancel_proposal", "id": "nope"}], "reply": "ביטלתי"})
+    r, _ = say(e, "בטל את ההצעה")
+    check(r.endswith("ℹ️ לא שיניתי כלום."), "cancelling a proposal that is not pending changes nothing, and says so")
+    e = env({"actions": [{"action": "personal", "op": "create", "title": "פגישה", "start": "2026-10-27T10:00", "end": "2026-10-27T11:00"}], "reply": "הצעתי"},
+            {"actions": [{"action": "cancel_proposal", "id": "PID"}], "reply": "ביטלתי"})
+    say(e, "פגישה בשלישי")
+    pid = next(iter(st(e)["bot"]["pp"]))
+    e["llm"].items[0]["actions"][0]["id"] = pid
+    r, _ = say(e, "לא משנה, בטל")
+    check("ביטלתי את ההצעה שחיכתה לאישור" in r and st(e)["bot"]["pp"][pid]["state"] == "cancelled", f"real cancellation is reported ({r[-50:]!r})")
+    long_reply = "מילה " * 1100
+    e = env({"actions": [], "reply": long_reply})
+    r, _ = say(e, "ספר לי הכול")
+    check(len(r) <= 4000 and r.endswith("ℹ️ לא שיניתי כלום."), f"a very long reply is trimmed so the last line survives ({len(r)} chars)")
+    e = env({"actions": [{"action": "note", "text": "x"}, {"oops": 1}, "junk"], "reply": "רשמתי"})
+    r, b = say(e, "תזכור")
+    check("דילגתי על 2 פעולות" in r and any("dropped 2" in l for l in b.log), "malformed actions are reported, not dropped silently")
     e = env({"actions": [{"action": "capacity", "date": "2026-10-29", "max_sessions": 0, "text": "x"}], "reply": ""})
     r, _ = say(e, "ביום חמישי אין לי זמן")
     check("השארתי" in r and "ℹ️ לא שיניתי" not in r, "executed action: its own result, no 'nothing changed'")
@@ -146,9 +167,14 @@ def outcome_line():
 def why_command():
     print("== הפקודה \"למה\"")
     e = env()
-    e["tg"].user_text("למה?")
+    e["tg"].user_text("מה עשית?")
     step(e)
     check("עוד לא פענחתי" in e["tg"].sent[-1]["text"], "no message yet")
+    e = env({"actions": [], "reply": "כי עוד לא הספקת לסמן שיעור."})
+    e["tg"].user_text("למה?")
+    step(e)
+    check(len(e["llm"].calls) == 1 and "עוד לא הספקת" in e["tg"].sent[-1]["text"],
+          "a bare 'למה?' with nothing recently decoded is a question for Claude, not the debug view")
     e = env({"actions": [{"action": "capacity", "date": "2026-10-29", "max_sessions": 0, "text": "x"},
                          {"action": "personal", "op": "create", "title": "תור", "start": "2026-10-27T10:00", "end": "2026-10-27T11:00"}],
              "reply": "הבנתי: חמישי פנוי"})
@@ -156,6 +182,7 @@ def why_command():
     e["tg"].user_text("למה")
     step(e)
     w = e["tg"].sent[-1]["text"]
+    check(len(e["llm"].calls) == 1, "'למה' right after a decoded message shows what was understood (no new Claude call)")
     check(w.startswith("🔍") and "ביום חמישי אין לי זמן" in w and "capacity 2026-10-29" in w and "✅ הובנה" in w, "shows the message, status and actions")
     check("מה קרה:" in w and "נשלחה הצעה אחת לאישור" in w, "shows what happened")
     check(ai(e)["text"].startswith("ביום חמישי"), "command does not overwrite the last analysis")
@@ -163,6 +190,16 @@ def why_command():
         e["tg"].user_text(cmd)
         step(e)
         check(e["tg"].sent[-1]["text"].startswith("🔍"), f"'{cmd}' works")
+    blob = st(e)
+    blob["bot"]["last_ai"]["at"] = P.iso(e["clock"].t - timedelta(hours=2))      # הניתוח האחרון ישן
+    e["store"].blob = json.dumps(blob, ensure_ascii=False)
+    e["llm"].items.append({"actions": [], "reply": "כי ביקשת."})
+    e["tg"].user_text("למה?")
+    step(e)
+    check(e["tg"].sent[-1]["text"] == "כי ביקשת." + "\nℹ️ לא שיניתי כלום.", "two hours later a bare 'למה?' goes to Claude")
+    e["tg"].user_text("מה עשית")
+    step(e)
+    check(e["tg"].sent[-1]["text"].startswith("🔍") and "(" in e["tg"].sent[-1]["text"].split("\n")[0], "'מה עשית' always works; shows the time")
     e = env(A.Truncated("x"), A.Truncated("x"))
     say(e, "ארוך")
     e["tg"].user_text("למה")
@@ -215,14 +252,17 @@ def multi_day():
     trip = next(m for m in props if "נסיעה" in m["text"])
     check(end in trip["text"], f"trip starts at the last lesson's end ({end})")
     cap = st(e).get("capacity", {})
-    check(set(cap) == {thu, fri.isoformat()} and all(v == 0 for v in cap.values()), f"capacity 0 for Thu and Fri, not Saturday ({sorted(cap)})")
-    check("רשמתי: אין סשנים ב-2 ימים" in r, "range summarised in one line")
+    check(set(cap) == {thu, fri.isoformat(), sat.isoformat()} and all(v == 0 for v in cap.values()), f"capacity 0 for Thu, Fri and Sat ({sorted(cap)})")
+    check("רשמתי: אין סשנים ב-3 ימים" in r, f"range summarised in one line, counting every day ({r[:70]!r})")
+    left = [x for x in st(e)["sessions"] if x["status"] == "planned" and x["start"][:10] in cap]
+    check(not left, f"nothing left planned on the trip days, and nothing moved onto another day of the range ({len(left)})")
     check(not e["cal"].cals.get(PERS), "nothing written to the personal calendar yet")
     press(e, multi, lambda tx, d: d.startswith("pp|ok"))
     ev = list(e["cal"].cals[PERS].values())[0]
     check(ev["start"] == {"date": fri.isoformat()} and ev["end"] == {"date": (sat + timedelta(days=1)).isoformat()},
           f"approval creates one all-day event Fri–Sat (end exclusive): {ev['start']} {ev['end']}")
-    for bad, why in (({"end_date": "2026-10-20"}, "end before start"), ({"end_date": "2026-12-30"}, "over 30 days")):
+    for bad, why in (({"end_date": "2026-10-20"}, "end before start"), ({"end_date": "2026-12-30"}, "over 30 days"),
+                     ({"end_date": "2026-12-02"}, "31 days inclusive")):
         e["llm"].items.append({"reply": "", "actions": [dict({"action": "personal", "op": "create", "all_day": True, "date": "2026-11-02",
                                                                "title": "x"}, **bad)]})
         r, _ = say(e, "אירוע")
@@ -230,6 +270,129 @@ def multi_day():
     e["llm"].items.append({"reply": "", "actions": [{"action": "capacity", "date": "2026-10-26", "to": "2026-12-30", "max_sessions": 0}]})
     r, _ = say(e, "מילואים")
     check("לא ביצעתי" in r and "טווח" in r, "capacity range over 14 days rejected")
+    e["llm"].items.append({"reply": "", "actions": [{"action": "personal", "op": "create", "all_day": True, "date": "2026-11-02", "end_date": "2026-12-01",
+                                                      "title": "מילואים"}]})
+    n = len(e["tg"].sent)
+    r, _ = say(e, "מילואים חודש")
+    check("לא ביצעתי" not in r, "exactly 30 days inclusive is accepted")
+    cap_cases(e)
+
+
+def cap_cases(e):
+    """קלט קיבולת לא תקין או חסר, בלי להפיל את ההודעה."""
+    for bad, word in (({"max_sessions": -1}, "שלילי"), ({"max_sessions": "הרבה"}, "מספר"), ({"date": "אתמול בערב"}, "תאריך")):
+        e["llm"].items.append({"reply": "", "actions": [dict({"action": "capacity", "date": "2026-10-28", "max_sessions": 1}, **bad)]})
+        r, _ = say(e, "קיבולת")
+        check("לא ביצעתי" in r and word in r, f"capacity input {bad}: Hebrew error ({r[-50:]!r})")
+    e["llm"].items.append({"reply": "", "actions": [{"action": "capacity", "date": "2026-10-28", "max_sessions": "0", "text": "x"}]})
+    say(e, "אין")
+    check(st(e)["capacity"].get("2026-10-28") == 0, "'0' as a string is understood")
+    qs = len(st(e)["pending_questions"])
+    e["llm"].items.append({"reply": "", "actions": [{"action": "capacity", "date": "2026-11-03", "to": "2026-11-06", "max_sessions": None, "text": "עסוק"}]})
+    r, _ = say(e, "אני עסוק בימים האלה")
+    check(len(st(e)["pending_questions"]) == qs + 1 and "כמה סשנים" in r and "2026-11-03" not in st(e).get("capacity", {}),
+          "a range without a number: one question, nothing guessed")
+
+
+def surplus_cases():
+    print("== העברת עודף: חזרה שבועית, ושיבוץ מחדש לא לפני השיעור")
+    e = env()
+    e["llm"].items.append({"reply": "", "actions": [{"action": "capacity", "date": "2026-10-25", "max_sessions": 2, "text": "ביום ראשון רק 2"}]})
+    r, _ = say(e, "ביום ראשון רק שתי חזרות")
+    weekly = [x for x in st(e)["sessions"] if x["kind"] == "weekly" and x["status"] == "planned"]
+    check("מרתון" not in r and "השארתי" in r, f"weekly surplus message is not about the marathon ({r[:90]!r})")
+    check(len([x for x in weekly if x["start"][:10] == "2026-10-25"]) <= 2, "Sunday is down to the limit")
+    check(all(x["status"] in ("planned", "dropped") for x in st(e)["sessions"] if x["kind"] == "weekly"), "weekly sessions moved or dropped, never marked missed")
+
+    e = env()
+    b = bot_of(e)
+    b.load_state()
+    uni, _ = b.load_uni()
+    today = date(2026, 10, 27)
+    lesson = date(2026, 10, 29)
+    state = dict(st(e), sessions=[{"key": "review:math:x", "kind": "review", "course": "math", "courses": ["math"], "status": "missed",
+                                    "start": "2026-10-27T20:00+01:00", "end": "2026-10-27T20:45+01:00", "lesson_day": lesson.isoformat()}])
+    r = P.reschedule(today, uni, [], state, datetime(2026, 10, 27, 8, 0, tzinfo=P.TZ))
+    days = [x["start"][:10] for x in r["rescheduled"]]
+    check(all(d >= lesson.isoformat() for d in days), f"a missed review is never moved to before its lesson ({days})")
+
+
+def mail_tool():
+    print("== סיכום מיילים: פלט מובנה, חיתוך וגיבוי")
+    mail = [json.dumps({"id": "m1", "from": "dean@runi.ac.il", "subject": "הרשמה", "date": "2026-10-24", "body": "עד 15.11"})]
+    ans = {"items": [{"id": "m1", "important": True, "summary": "הרשמה עד 15.11", "actions": []}]}
+
+    def run(*items):
+        e = make_env("2026-10-24T21:00")
+        e["llm"] = Seq(*items)
+        e["store"].mail = list(mail)
+        run_until(e, t("2026-10-25T08:10"))
+        return e
+
+    e = run(A.Truncated("cut"), ans)
+    kw = e["llm"].kw
+    morning = next((m for m in e["tg"].sent if m["text"].startswith("☀️")), None)
+    check(kw and kw[0]["tool"] and "items" in kw[0]["tool"]["properties"] and kw[0]["max_tokens"] >= 4000, "mail digest uses a structured tool and a large limit")
+    check(len(kw) == 2 and kw[1]["max_tokens"] == 2 * kw[0]["max_tokens"] and morning and "הרשמה עד 15.11" in morning["text"],
+          "truncated digest is retried with a doubled limit")
+    e = run(A.Permanent("claude: 400 tools are not supported"), ans)
+    morning = next((m for m in e["tg"].sent if m["text"].startswith("☀️")), None)
+    check(e["llm"].kw[1]["tool"] is None and morning and "הרשמה עד 15.11" in morning["text"], "tool rejected: falls back to plain text")
+
+
+def health_cases():
+    print("== בדיקת חיבורים: פינג קצר שנחתך אינו כשל")
+    from bot import health
+
+    class Cut:
+        def complete(self, system, user, max_tokens=800, media=None, tool=None):
+            if tool:
+                return json.dumps({"ok": True})
+            raise A.Truncated("cut")
+
+    out = "\n".join(health.run(type("T", (), {})(), type("C", (), {"email": "x", "list": lambda *a: [], "access_role": lambda *a: "writer",
+                                                                  "create": lambda *a: {"id": "1"}, "delete": lambda *a: None})(),
+                              type("F", (), {"fetch": lambda s: ""})(), type("S", (), {})(), Cut(),
+                              {"REVIEWS_CAL": "r", "PERSONAL_CAL": "p"}, datetime(2026, 10, 25, 8, 0, tzinfo=P.TZ)))
+    check("✅ Claude: מגיב" in out and "✅ Claude (פלט מובנה): תקין" in out and "❌ Claude" not in out, "a cut-off ping is not a failure")
+
+
+def media_blocked():
+    print("== קובץ: פעולות חסומות מסומנות ומדווחות")
+    e = env({"actions": [{"action": "done", "id": "x"}, {"action": "note", "text": "ראיתי תמונה"}], "reply": "ראיתי"})
+    e["tg"].user_media("photo", "f", IMG, caption="זה מה?")
+    step(e)
+    r = e["tg"].sent[-1]["text"]
+    check("מקובץ אני מציע רק" in r and "פעולה אחת" in r, f"blocked action is reported ({r[-60:]!r})")
+    w = bot_of(e)
+    w.load_state()
+    check("נחסם" in w.why_text() and "(קובץ)" in w.why_text(), "the debug view marks it as blocked")
+    check(any(x["w"] == "u" and "[תמונה]" in x["t"] for x in st(e)["bot"]["chat"]), "the photo caption enters the chat history")
+
+
+def history_on_failure():
+    print("== הודעה שנכשלה נשארת בהיסטוריית השיחה")
+    e = env("לא JSON", "גם לא")
+    say(e, "כל הסופ\"ש בחיפה")
+    check(any(x["w"] == "u" and "בחיפה" in x["t"] for x in st(e)["bot"]["chat"]), "failed message is in the history, so 'מה קיבלת?' can see it")
+    e["llm"].items.append({"actions": [], "reply": "ראיתי"})
+    say(e, "מה קיבלת?")
+    ctx = e["llm"].calls[-1]
+    check("בחיפה" in ctx, "the next message gets the failed one as context")
+    b = bot_of(e)
+    b.load_state()
+    c = json.loads(b.context_for_llm())
+    check(any("בחיפה" in n for n in c["recent_notes"]), "recent notes reach the context")
+
+
+def pending_view():
+    print("== הצעות ממתינות: סוף אירוע יום שלם כולל")
+    e = env({"actions": [{"action": "personal", "op": "create", "all_day": True, "date": "2026-10-30", "end_date": "2026-10-31", "title": "בחיפה"}], "reply": "הצעתי"})
+    say(e, "בחיפה בסופש")
+    b = bot_of(e)
+    b.load_state()
+    p = b.pending_for_llm()
+    check(p and p[0]["all_day"] and p[0]["start"] == "2026-10-30" and p[0]["end"] == "2026-10-31", f"inclusive last day ({p})")
 
 
 def adapter():
@@ -244,7 +407,7 @@ def adapter():
             return self.data
 
     def post_ok(url, timeout, headers, json):  # noqa: A002
-        sent.update(json)
+        sent.update(json, _timeout=timeout)
         return R({"stop_reason": "tool_use", "content": [{"type": "text", "text": "ignored"},
                                                         {"type": "tool_use", "name": "respond", "input": {"actions": [], "reply": 'כל הסופ"ש'}}]})
 
@@ -256,6 +419,9 @@ def adapter():
         check(json.loads(out) == {"actions": [], "reply": 'כל הסופ"ש'}, "tool input comes back as valid JSON, quote and all")
         check(sent["tool_choice"] == {"type": "tool", "name": "respond"} and sent["tools"][0]["input_schema"] == {"type": "object"},
               "request forces the tool")
+        check(sent["_timeout"] == 60, "normal request: 60s")
+        c.complete("s", "u", 4000, tool={"type": "object"})
+        check(sent["_timeout"] == 120, "a large output limit gets a longer timeout")
         A.requests.post = lambda *a, **k: R({"stop_reason": "end_turn", "content": [{"type": "text", "text": "טקסט"}]})
         check(c.complete("s", "u") == "טקסט", "no tool: plain text as before")
         A.requests.post = lambda *a, **k: R({"stop_reason": "max_tokens", "content": [{"type": "tool_use", "input": {"actions": [{"ac": 1}]}}]})
@@ -273,7 +439,12 @@ def parse_unit():
     print("== parse_plan")
     p = Bot.parse_plan
     check(p('בטח!\n```json\n{"actions":[],"reply":"אוקיי"}\n```')["reply"] == "אוקיי", "fenced JSON with text around it")
-    check(p('{"actions":"x","reply":5}') == {"actions": [], "reply": "5"}, "bad shapes are normalised")
+    check(p('{"actions":"","reply":5}') == {"actions": [], "reply": "5", "dropped": 0}, "bad shapes are normalised")
+    check(p('{"actions":"x","reply":"a"}') is None, "an unparsable non-empty actions string is a parse failure (retried), not 'no actions'")
+    check(p(json.dumps({"actions": json.dumps([{"action": "note", "text": "ש"}]), "reply": "r"}))["actions"] == [{"action": "note", "text": "ש"}],
+          "actions delivered as a JSON string are decoded")
+    check(p('{"actions":{"action":"note"},"reply":"r"}')["actions"] == [{"action": "note"}], "a single action object is wrapped")
+    check(p('{"actions":[1,{"action":""},{"x":1},{"action":"note"}],"reply":"r"}')["dropped"] == 3, "dropped actions are counted")
     check(p('{"actions":[1,"a",{"action":"note"}],"reply":null}')["actions"] == [{"action": "note"}], "non-dict actions dropped")
     check(p("[1,2]") is None and p("") is None and p(None) is None and p("{oops") is None, "garbage = None")
 
@@ -285,6 +456,12 @@ def main():
     health_check()
     explain_context()
     multi_day()
+    surplus_cases()
+    mail_tool()
+    health_cases()
+    media_blocked()
+    history_on_failure()
+    pending_view()
     adapter()
     parse_unit()
     print("\nFAILS:", FAILS)

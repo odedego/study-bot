@@ -825,6 +825,8 @@ def reschedule(today: date, uni: Uni, personal: list[Ev], state: dict, now: date
         for i in range(0, 7):
             day = today + timedelta(days=i)
             wd = day.weekday()
+            if m.get("lesson_day") and day < date.fromisoformat(m["lesson_day"]):
+                continue      # לא חוזרים על שיעור לפני שהתקיים
             if wd in CONFIG["reschedule_no_extra_weekdays"] or added_per_day[day] >= CONFIG["reschedule_max_per_day"]:
                 continue
             same = sum(1 for s in existing if s.start.date() == day and s.course == m["course"])
