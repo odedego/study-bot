@@ -26,7 +26,7 @@ from datetime import date, datetime, time, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import planner as P  # noqa: E402
 from bot import semester as SEM  # noqa: E402
-from bot.extras import ExtrasMixin  # noqa: E402
+from bot.extras import ExtrasMixin, PlanBlocked  # noqa: E402
 from bot.lessons_cal import LessonsCalMixin  # noqa: E402
 from bot.mail import MailMixin  # noqa: E402
 from bot.marathon import MarathonMixin  # noqa: E402
@@ -443,6 +443,23 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 count += 1
         return {**r, "rescheduled": keep, "not_placed": r["not_placed"] + extra}
 
+    def propose_unplaced(self, key: str, title: str, today: date) -> bool:
+        """סשן שלא נכנס ללוח לא נמחק: מציעים לו משבצת לאישור (כפתור). אין משבצת: נשאר 'צריך החלטה'."""
+        s = next((x for x in self.st["sessions"] if x.get("key") == key), None)
+        c = (s or {}).get("course")
+        if c not in COURSES:
+            return False
+        try:
+            slots = self.find_slots(1, today, today + timedelta(days=7), c, budget=False)
+        except PlanBlocked:
+            return False
+        if not slots:
+            return False
+        name = COURSES[c]["name"]
+        self.propose_extra("rescheduled", c, f"📚 {name} · השלמה", f"השלמה: {title} לא נכנס ללוח.", slots,
+                           f"{title} לא נכנס ללוח השבוע. הצעה להשלמה:", ref=key)
+        return True
+
     def restore(self, s: dict) -> str:
         d = datetime.fromisoformat(s["start"]).date()
         for e in self.reviews(d, 1):
@@ -645,7 +662,14 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                     except Exception:  # noqa: BLE001
                         pass
                 moved.append(f"• {strip_marks(x['from_title'])} → {dd(datetime.fromisoformat(x['start']).date())} {x['start'][11:16]}")
-            not_placed = [f"• {x['title']}" for x in r["not_placed"]]
+            not_placed, proposed = [], 0
+            for x in r["not_placed"]:
+                # עד 2 הצעות בבוקר (כדי לא להציף): השאר נשארים ב"צריך החלטה", לא נמחקים
+                if proposed < 2 and self.propose_unplaced(x["key"], strip_marks(x["title"]), today):
+                    proposed += 1
+                    moved.append(f"• {strip_marks(x['title'])}: שלחתי הצעה להשלמה לאישור")
+                else:
+                    not_placed.append(f"• {x['title']}")
             p = self.sync_week(P.week_start(today), uni, personal)
             created = p["created"]
             not_placed += [f"• {x['title']} (השבוע כבר מלא, 11 סשנים)" for x in p["capped"]]
@@ -1597,7 +1621,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         res = sum(1 for k, v in self.st["bot"]["attend"].items() if k.startswith(c + "|") and v == "reserve")
         extra = f" (+{res} מילואים)" if res else ""
         if lim is None:
-            return f"{COURSES[c]['name']}: {n} היעדרויות{extra}"
+            return f"{COURSES[c]['name']}: {n} היעדרויות · מגבלה: לא ידוע{extra}"
         if lim == 0:
             return f"{COURSES[c]['name']}: {n} היעדרויות, חובה להגיע לכל מפגש{extra}"
         return f"{COURSES[c]['name']}: {n}/{lim}{extra}"
@@ -1618,7 +1642,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             elif lim is not None and n == lim:
                 self.tg.send(f"⚠️ {COURSES[c]['name']}: זו ההיעדרות האחרונה המותרת ({n}/{lim}). עוד אחת וחסום המבחן.")
             elif lim is None:
-                self.tg.send(f"{COURSES[c]['name']}: נרשמה היעדרות ({n}). אין לי עדיין את מגבלת הקורס מהסילבוס.")
+                self.tg.send(f"{COURSES[c]['name']}: נרשמה היעדרות ({n}). מגבלה: לא ידוע (אין סילבוס עדיין).")
             return msg + f" ({n}" + (f"/{lim})" if lim is not None else ")")
         return msg
 

@@ -35,7 +35,7 @@ class ExtrasMixin:
         n = sum(1 for s in self.st["sessions"] if s.get("kind") in EXTRA_KINDS and s.get("status") in ("planned", "done", "missed")
                 and ws.isoformat() <= s["start"][:10] < we.isoformat())
         for xid, p in self.st["bot"].get("xp", {}).items():
-            if xid != skip and self._xp_live(p):
+            if xid != skip and self._xp_live(p) and p.get("kind") in EXTRA_KINDS:
                 n += sum(1 for a, _ in p["slots"] if ws.isoformat() <= a[:10] < we.isoformat())
         return n
 
@@ -123,7 +123,9 @@ class ExtrasMixin:
 
     def _send_xp(self, xid: str):
         p = self.st["bot"]["xp"][xid]
-        text = self._xp_text(p).replace("\n", "\nהצעה:\n", 1) + f"\n(מעבר ל-11 הסשנים הרגילים. עד {EXTRA_WEEKLY_MAX} תוספות בשבוע.)"
+        text = self._xp_text(p).replace("\n", "\nהצעה:\n", 1)
+        if p.get("kind") in EXTRA_KINDS:
+            text += f"\n(מעבר ל-11 הסשנים הרגילים. עד {EXTRA_WEEKLY_MAX} תוספות בשבוע.)"
         p["send_try"] = p.get("send_try", 0) + 1     # נכשל? resend_undelivered ינסה שוב (עד 3), אחרת "failed"
         p["mid"] = self.tg.send(text, [[("✅ שבץ", f"xp|ok|{xid}"), ("✖️ לא צריך", f"xp|no|{xid}")]])
 
@@ -402,13 +404,8 @@ class ExtrasMixin:
                 out.append(f"• {x['from_title']} → {_dd(a.date())} {P.fmt_t(a)}")
             idx = {x["key"]: x for x in self.st["sessions"]}
             for x in r["not_placed"]:
-                s0 = idx.get(x["key"])
-                if s0 and s0.get("eventId"):
-                    try:
-                        self.cal.delete(self.reviews_cal, s0["eventId"])   # לא משאירים אותו ביום שפינית
-                    except Exception as e:  # noqa: BLE001
-                        self.log.append(f"capacity delete: {e}")
-                out.append(f"• {x['title']}: לא מצאתי מקום השבוע, הורד מהיומן ועובר לחזרה השבועית")
+                # לא מוחקים מהיומן בלי אישור: האירוע נשאר, ומציעים משבצת חלופית (או שעודד מחליט)
+                out.append(f"• {x['title']}: לא מצאתי מקום השבוע. האירוע נשאר ביומן, תגיד אם להזיז או למחוק")
         return f"✅ השארתי ב-{_dd(day)} {max_sessions} סשנים. הזזתי:\n" + "\n".join(out)
 
     def _drop(self, s: dict, note: str):

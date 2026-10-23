@@ -67,9 +67,10 @@ def feed_down():
     orig = cal.list
     cal.list = boom(orig, PERS, "calendar 503")
     llm.script.append({"reply": "", "actions": [{"action": "extra", "course": "math", "date": "2026-10-27"}]})
+    n_prop = sum(1 for m in tg.sent if m["text"].startswith("💡"))     # הצעות השלמה מהבוקר קודמות לבקשה
     tg.user_text("תוסיף לי תרגול במתמטיקה היום")
     step(e)
-    check(last(tg, "💡") is None and "לא ביצעתי" in tg.sent[-1]["text"], "no extra proposed while the personal calendar is unreadable")
+    check(sum(1 for m in tg.sent if m["text"].startswith("💡")) == n_prop and "לא ביצעתי" in tg.sent[-1]["text"], "no extra proposed while the personal calendar is unreadable")
     cal.list = orig
     e["feed"].broken = True
     run_until(e, t("2026-10-27T08:05"))

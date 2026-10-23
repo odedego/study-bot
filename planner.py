@@ -74,7 +74,6 @@ CONFIG = {
     "evening_class_weekdays": [THU],
     "free_weekdays": [SUN, TUE, FRI],
     "closed_weekdays": [SAT],
-    "saturday_backup_start": "12:00",
     "max_same_course_per_day": 2,
     "day_total_max": 7,                # תקרה כוללת ליום (חזרות + תוספות + מרתון)
     "weekly_review_weekday": SUN,
@@ -834,20 +833,16 @@ def reschedule(today: date, uni: Uni, personal: list[Ev], state: dict, now: date
                 continue
             if day_room(state, day, sum(1 for s in existing if s.start.date() == day)) <= 0:
                 continue
-            if wd == SAT:
-                # גיבוי בשבת רק לחומר של חמישי
-                if date.fromisoformat(m["lesson_day"]).weekday() != THU:
-                    continue
-                prof = {"start": at(day, hm(CONFIG["saturday_backup_start"])), "end": at(day, hm("15:00")), "cap": 1}
-            else:
-                prof = day_profile(day, uni)
-                if prof["type"] == "class_day":
-                    continue
-                on_day = sum(1 for s in existing if s.start.date() == day)
-                total_cap = CONFIG["reschedule_total_cap_free_day"] if prof["type"] == "free" else prof["cap"] + 1
-                if on_day >= total_cap:
-                    continue
-                prof = dict(prof, cap=prof["cap"] + CONFIG["reschedule_max_per_day"])
+            if wd in CONFIG["closed_weekdays"]:
+                continue      # שבת: הבוט לא משבץ לבד. רק עודד רשאי לתאם סשן בשבת.
+            prof = day_profile(day, uni)
+            if prof["type"] == "class_day":
+                continue
+            on_day = sum(1 for s in existing if s.start.date() == day)
+            total_cap = CONFIG["reschedule_total_cap_free_day"] if prof["type"] == "free" else prof["cap"] + 1
+            if on_day >= total_cap:
+                continue
+            prof = dict(prof, cap=prof["cap"] + CONFIG["reschedule_max_per_day"])
             if day == today:
                 prof = dict(prof, start=max(prof["start"], _round_up(now + timedelta(minutes=30))))
             slots = free_slots(day, prof, busy_blocks(day, uni, personal), existing)
@@ -879,8 +874,8 @@ def apply_reschedule(st: dict, r: dict):
                               | {"status": "planned"})
     for x in r["not_placed"]:
         if x["key"] in idx:
-            idx[x["key"]]["status"] = "dropped"
-            idx[x["key"]]["note"] = "לא נמצא מקום תוך שבוע; עובר לחזרה השבועית."
+            idx[x["key"]]["status"] = "unplaced"      # לא נמחק ולא מוסר: הבוט מציע משבצת לאישור (עודד מחליט)
+            idx[x["key"]]["note"] = "לא נמצא מקום תוך שבוע; ממתין להחלטה."
 
 
 # ---------------------------------------------------------------- diff
@@ -1009,7 +1004,7 @@ def compact_state(st: dict, now: datetime):
             row["planned"] += 1 if s.get("kind") != "rescheduled" else 0
             if s.get("status") == "done":
                 row["done"] += 1
-            elif s.get("status") in ("missed", "dropped"):
+            elif s.get("status") in ("missed", "dropped", "unplaced"):
                 row["missed"] += 1
             if s.get("kind") == "marathon" and s.get("course"):
                 # התקדמות המרתון נשמרת גם אחרי שהסשן עצמו נמחק מהמצב
@@ -1125,7 +1120,7 @@ def week_report(ws: date, st: dict, now: datetime | None = None) -> dict:
         stt = s.get("status")
         if stt == "done":
             per[c]["done"] += 1
-        elif stt in ("missed", "dropped", "rescheduled"):
+        elif stt in ("missed", "dropped", "rescheduled", "unplaced"):
             per[c]["missed"] += 1
         elif stt == "planned":
             per[c]["open"] += 1

@@ -140,7 +140,7 @@ def semester_part():
     if xp:
         b = bot_of(e)
         b.load_state()
-        p = next(iter(b.st["bot"]["xp"].values()))
+        p = next(x for x in b.st["bot"]["xp"].values() if x["kind"] == "extra")
         slot_day = date.fromisoformat(p["slots"][0][0][:10])
         check(slot_day.weekday() not in (P.MON, P.WED, P.SAT) and date(2026, 10, 27) <= slot_day <= date(2026, 10, 30),
               f"slot within 4 days, not Mon/Wed/Sat ({slot_day})")
