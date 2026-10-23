@@ -111,9 +111,12 @@ class ExtrasMixin:
         return out
 
     # ------------------------------------------------------------ proposals
-    def propose_extra(self, kind: str, course: str, label: str, note: str, slots: list, reason: str, ref: str = "") -> str:
+    def propose_extra(self, kind: str, course: str, label: str, note: str, slots: list, reason: str, ref: str = "",
+                      lesson_day: str | None = None) -> str:
         p = {"kind": kind, "course": course, "label": label, "note": note, "reason": reason, "ref": ref,
              "slots": [(P.iso(a), P.iso(b)) for a, b in slots], "state": "pending", "at": P.iso(self.now)}
+        if lesson_day:
+            p["lesson_day"] = lesson_day     # השלמה (rescheduled): הכותרת והשיבוץ מחדש צריכים את יום השיעור
         xid = P.exc_id(f"{kind}{course}{ref}{p['slots']}")[:8]
         if xid in self.st["bot"].setdefault("xp", {}):
             return xid
@@ -191,7 +194,8 @@ class ExtrasMixin:
         made = p.setdefault("made", [])
         for i, (a, b) in enumerate(final):
             key = self.unique_key(f"{p['kind']}:{p['course']}:{p.get('ref') or xid}:{i + 1}@{a.date().isoformat()}")
-            sess = P.Session(key, p["kind"], p["course"], [p["course"]], a, b, None, note=p["note"], label=p["label"])
+            ld = date.fromisoformat(p["lesson_day"]) if p.get("lesson_day") else None
+            sess = P.Session(key, p["kind"], p["course"], [p["course"]], a, b, ld, note=p["note"], label=p["label"])
             js = sess.to_json()
             eid = self.create_event(js)
             self.st["sessions"].append({k: js[k] for k in ("key", "kind", "course", "courses", "start", "end", "lesson_day", "note", "label")}

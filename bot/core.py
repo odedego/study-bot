@@ -46,7 +46,19 @@ JOBS = {
     "daily": ([P.SUN, P.MON, P.TUE, P.WED, P.THU], "21:30", 3),
     "weekend": ([P.SAT], "21:00", 24),   # שאלה על סשנים של שישי שלא סומנו (משימה נפרדת: לא תלויה בסיכום השבועי)
     "weekly": ([P.SAT], "21:00", 24),
+    "reinforce": ([P.MON, P.THU], "21:45", 3),   # 💪 מה צריך חיזוק (עודד אישר: שני וחמישי בערב)
 }
+
+
+def dup_numbers(items: list) -> list[int]:
+    """לכל פריט: 0 אם הוא יחיד, אחרת המספר הסידורי שלו (1, 2, ...) בין הזהים לו."""
+    total, seen, out = {}, {}, []
+    for x in items:
+        total[x] = total.get(x, 0) + 1
+    for x in items:
+        seen[x] = seen.get(x, 0) + 1
+        out.append(seen[x] if total[x] > 1 else 0)
+    return out
 
 
 def sid(key: str) -> str:
@@ -129,7 +141,30 @@ def command_of(text: str) -> str | None:
     return cmd if cmd in COMMANDS else None
 
 
-SCHEDULED = ("☀️", "🌙", "📊", "🚆", "🗓 סמן", "🔧", "📌 להוסיף למשימות", "📌 משימות פתוחות", "🔍 ההודעה האחרונה")
+SUM_WORDS = {"סיכום", "סכם", "תסכם", "סכמי", "תסכמי", "סיכומים"}
+PLAN_WORDS = {"תכנון", "התכנון", "תוכנית", "התוכנית", "תכנית", "התכנית", "מתוכנן", "תכנן"}
+WEEK_WORDS = {"שבוע", "השבוע", "לשבוע", "שבועי", "השבועי", "שבועית"}
+TOMORROW_WORDS = {"מחר", "למחר"}
+FILLER_WORDS = {"מה", "לי", "את", "של", "תן", "תני", "תעשה", "אפשר", "בבקשה", "יש", "יום", "היום", "להיום", "יומי", "היומי",
+                "ה", "ל", "על", "עד", "עכשיו"} | WEEK_WORDS | TOMORROW_WORDS
+
+
+def view_intent(text: str) -> str | None:
+    """"סיכום" / "תכנון" וניסוחים קרובים ("סכם לי את היום", "מה התכנון לשבוע"): תצוגה מוכנה, בלי Claude.
+    רק כשכל המילים בהודעה הן מהרשימה (הודעה עם תוכן נוסף הולכת ל-Claude כרגיל).
+    מחזיר day_sum / week_sum / day_plan / tomorrow_plan / week_plan, או None."""
+    words = re.sub(r"[?!.,״\"']", " ", (text or "").strip()).replace("-", " ").split()
+    if not words or len(words) > 7 or not all(w in FILLER_WORDS | SUM_WORDS | PLAN_WORDS for w in words):
+        return None
+    week = any(w in WEEK_WORDS for w in words)
+    if any(w in SUM_WORDS for w in words):
+        return "week_sum" if week else "day_sum"
+    if any(w in PLAN_WORDS for w in words):
+        return "week_plan" if week else "tomorrow_plan" if any(w in TOMORROW_WORDS for w in words) else "day_plan"
+    return None
+
+
+SCHEDULED = ("☀️", "🌙", "📊", "🚆", "🗓 סמן", "💪 מה צריך חיזוק", "🔧", "📌 להוסיף למשימות", "📌 משימות פתוחות", "🔍 ההודעה האחרונה")
 
 
 def clean_title(t, n: int = 80) -> str:
@@ -457,7 +492,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             return False
         name = COURSES[c]["name"]
         self.propose_extra("rescheduled", c, f"📚 {name} · השלמה", f"השלמה: {title} לא נכנס ללוח.", slots,
-                           f"{title} לא נכנס ללוח השבוע. הצעה להשלמה:", ref=key)
+                           f"{title} לא נכנס ללוח השבוע. הצעה להשלמה:", ref=key, lesson_day=(s or {}).get("lesson_day"))
         return True
 
     def restore(self, s: dict) -> str:
@@ -558,7 +593,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 self.st["bot"]["jobs"][key] = "skipped"
                 continue
             res.append((name, key))
-        order = {"morning": 0, "recap": 1, "recapr": 2, "daily": 3, "weekend": 4, "weekly": 5}
+        order = {"morning": 0, "recap": 1, "recapr": 2, "daily": 3, "reinforce": 4, "weekend": 5, "weekly": 6}
         return sorted(res, key=lambda x: order[x[0]])
 
     def after_commit(self, fn):
@@ -626,9 +661,27 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         return sorted([s for s in self.st["sessions"] if s.get("start", "")[:10] == d.isoformat()
                        and s.get("status") in ("planned", "done", "missed")], key=lambda s: s["start"])
 
-    def sess_line(self, s: dict) -> str:
+    def sess_line(self, s: dict, n: int = 0) -> str:
         mark = {"done": "✅ ", "missed": "❌ "}.get(s.get("status"), "")
-        return f"• {mark}{s['start'][11:16]} {strip_marks(P._session_from_state(s).title())}"
+        return f"• {mark}{s['start'][11:16]} {strip_marks(P._session_from_state(s).title())}" + (f" ({n})" if n else "")
+
+    def sess_lines(self, ss: list[dict]) -> list[str]:
+        """כמה סשנים עם אותה כותרת באותו יום (אותו קורס): ממוספרים (1), (2). רק לתצוגה, המפתחות לא משתנים."""
+        titles = [(s["start"][:10], strip_marks(P._session_from_state(s).title())) for s in ss]
+        return [self.sess_line(s, n) for s, n in zip(ss, dup_numbers(titles))]
+
+    def number_dups(self, plan_lines: list[str]) -> list[str]:
+        """שורות של plan_text ("יום d.m: HH:MM כותרת | HH:MM כותרת"): ממספרים כותרות כפולות באותו יום."""
+        out = []
+        for line in plan_lines:
+            head, sep, rest = line.partition(": ")
+            if not sep or " | " not in rest:
+                out.append(line)
+                continue
+            items = rest.split(" | ")
+            nums = dup_numbers([("", it[6:] if it[:5].count(":") == 1 else it) for it in items])
+            out.append(head + sep + " | ".join(it + (f" ({n})" if n else "") for it, n in zip(items, nums)))
+        return out
 
     def job_morning(self, today: date):
         self._defer = []          # הצעות (מהמייל ומהמרתון) נשלחות אחרי הודעת הבוקר, ורק אחרי שהמשימה נשמרה
@@ -675,11 +728,21 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             not_placed += [f"• {x['title']} (השבוע כבר מלא, 11 סשנים)" for x in p["capped"]]
             mar_made = self.mar_commit()
         ex = P.exc_notify(today, uni, personal, self.st, True)
+        # ❓ צריך החלטה: ראשון בהודעה, לפני הלו"ז של היום
+        decide = [x for x in ex["new"] + ex["remind"] if x["type"] not in ("class_on_free_day",)]
+        if not_placed or decide:
+            names = [x[1:].strip() for x in not_placed]
+            lines += ["", "❓ צריך החלטה:"] + [f"• לא מצאתי מקום ל{x}" + (f" ({n})" if n else "") for x, n in zip(names, dup_numbers(names))]
+            for x in decide:
+                lines.append(f"• {x['text']}")
+                buttons.append([(f"👍 קיבלתי · {x['text'][:30]}", f"ack|{x['id']}")])
 
         ls, ss = self.lessons_lines(uni, today), self.sessions_on(today)
         if ls or ss:
             lines.append("")
-            lines += ls + [self.sess_line(s) for s in ss]
+            if not_placed or decide:
+                lines.append("📅 היום:")
+            lines += ls + self.sess_lines(ss)
         else:
             lines.append("היום אין שיעורים ואין סשנים.")
         mlines = self.marathon_morning()
@@ -712,12 +775,6 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             lines += ["", f"➕ נוספו ליומן {len(created)} סשנים חדשים."]
         if mar_made:
             lines += [""] + mar_made
-        decide = [x for x in ex["new"] + ex["remind"] if x["type"] not in ("class_on_free_day",)]
-        if not_placed or decide:
-            lines += ["", "❓ צריך החלטה:"] + [f"• לא מצאתי מקום ל{x[1:].strip()}" for x in not_placed]
-            for x in decide:
-                lines.append(f"• {x['text']}")
-                buttons.append([(f"👍 קיבלתי · {x['text'][:30]}", f"ack|{x['id']}")])
         tlines, tids = self.tasks_morning(today)
         if tlines:
             lines += [""] + tlines
@@ -733,18 +790,50 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         self.register_task_buttons(mid, base, tids)
 
     def recap_buttons(self, d: date, courses: list[str]):
-        rated = {r["course"]: r.get("rating") for r in self.st["recaps"] if r.get("date") == d.isoformat()}
+        """שני שלבים לכל קורס: קודם נוכחות. רק אחרי "הייתי" מופיע דירוג ההבנה."""
+        ds = d.isoformat()
+        rated = {r["course"]: r.get("rating") for r in self.st["recaps"] if r.get("date") == ds}
+        att = {c: self.st["bot"]["attend"].get(f"{c}|{ds}") for c in courses}
         rows = []
         for c in courses:
-            row = [(COURSES[c]["name"][:10], "noop")]
-            for n in range(1, 6):
-                row.append((f"•{n}•" if rated.get(c) == n else str(n), f"rate|{c}|{d.isoformat()}|{n}"))
-            rows.append(row)
-            cur = self.st["bot"]["attend"].get(f"{c}|{d.isoformat()}")
-            rows.append([((("•" if cur == v else "") + lab + ("•" if cur == v else "")), f"att|{c}|{d.isoformat()}|{v}")
-                         for lab, v in (("🙋 הייתי", "present"), ("🚫 לא הייתי", "absent"), ("🎖️ מילואים", "reserve"))])
-        rows.append([("✅ הכול ברור (5 לכולם)", f"rateall|{d.isoformat()}")])
+            name = COURSES[c]["name"][:10]
+            if att[c] is None:
+                rows.append([(name, "noop")] + [(lab, f"att|{c}|{ds}|{v}")
+                                                 for lab, v in (("🙋 הייתי", "present"), ("🚫 לא", "absent"), ("🎖️ מילואים", "reserve"))])
+            elif att[c] == "present":
+                rows.append([(name, "noop")] + [(f"•{n}•" if rated.get(c) == n else str(n), f"rate|{c}|{ds}|{n}") for n in range(1, 6)])
+            else:
+                rows.append([(f"{name} · {ATT_LABEL[att[c]]}", "noop"), ("🙋 בעצם הייתי", f"att|{c}|{ds}|present")])
+        if sum(1 for c in courses if att[c] is None) > 1:
+            rows.append([("🙋 הייתי בכולם", f"attall|{ds}")])
+        if any(att[c] == "present" for c in courses):
+            rows.append([("✅ הכול ברור (5 לכולם)", f"rateall|{ds}")])
         return rows
+
+    def propose_makeup(self, c: str, d: str) -> str:
+        """היעדרות משיעור: מציעים סשן השלמה (kind=rescheduled, לא נספר בתקציב התוספות). פעם אחת לכל שיעור."""
+        done = self.st["bot"].setdefault("makeup", [])
+        tag = f"{c}|{d}"
+        if tag in done or c not in COURSES:
+            return ""
+        today = self.now.date()
+        if date.fromisoformat(d) < today - timedelta(days=3):
+            return ""                 # היעדרות ישנה שנרשמה בדיעבד: רק נספרת
+        name = COURSES[c]["name"]
+        try:
+            first = max(today, date.fromisoformat(d))
+            slots = self.find_slots(1, first, first + timedelta(days=5), c, budget=False)
+        except PlanBlocked:
+            return f"📚 {name}: אציע השלמה כשאצליח לקרוא את המערכת."
+        done.append(tag)
+        self.st["bot"]["makeup"] = done[-60:]
+        if not slots:
+            return f"📚 לא מצאתי מקום להשלמה ב{name} בימים הקרובים. כתוב לי אם לחפש בכל זאת."
+        ld = date.fromisoformat(d)
+        self.propose_extra("rescheduled", c, f"📚 {name} · השלמה על {ld.day}.{ld.month}",
+                           f"השלמה לשיעור שהחמצת ({ld.day}.{ld.month}).", slots,
+                           f"{name}: החמצת את השיעור ב-{ld.day}.{ld.month}. כדאי סשן השלמה.", ref=f"abs:{d}", lesson_day=d)
+        return ""
 
     def job_recap(self, today: date):
         uni, _ = self.load_uni()
@@ -756,18 +845,21 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         self.st["bot"].setdefault("recap_sent", {}).clear()
         self.st["bot"]["recap_sent"][today.isoformat()] = P.iso(self.now)
         names = " · ".join(COURSES[c]["name"] for c in courses)
-        text = (f"🚆 ריקאפ · {dd(today)}\n{names}\n\nכמה הבנת היום? 1 = לא הבנתי, 5 = שולט.\n\n"
-                "ואז כתוב לי בחופשיות: מה נלמד, מה לא היה ברור, מטלות חדשות (מה, עד מתי, כמה זמן), "
-                "או שינוי בזמני הלימוד.")
+        text = (f"🚆 ריקאפ · {dd(today)}\n{names}\n\nקודם: היית בשיעור?\n"
+                "אחרי \"הייתי\" יופיע דירוג הבנה (1 = לא הבנתי, 5 = שולט). "
+                "אפשר גם לכתוב חופשי: מה נלמד, מה לא ברור, מטלות חדשות.")
         mid = self.tg.send(text, self.recap_buttons(today, courses))
         self.st["bot"]["msgs"][str(mid)] = {"type": "recap", "date": today.isoformat(), "courses": courses}
         self.st["bot"]["pending"] = {"type": "recap", "date": today.isoformat(), "courses": courses,
                                     "until": P.iso(self.now + timedelta(hours=8))}
 
     def job_recapr(self, today: date):
-        if any(r.get("date") == today.isoformat() for r in self.st["recaps"]):
+        ds = today.isoformat()
+        if any(r.get("date") == ds for r in self.st["recaps"]):
             return
-        self.tg.send("🚆 תזכורת קטנה לריקאפ: גם \"הכול ברור\" זו תשובה. כפתור אחד מספיק.")
+        if any(k.endswith("|" + ds) for k in self.st["bot"]["attend"]):
+            return            # כבר ענה על נוכחות לשיעור של היום: אין צורך בתזכורת
+        self.tg.send("🚆 תזכורת לריקאפ: היית בשיעורים היום? כפתור אחד מספיק.")
 
     def daily_buttons(self, d: date):
         rows = []
@@ -807,7 +899,9 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         if prog:
             lines += ["", "📈 השבוע: " + " · ".join(f"{n} {v['done']}/{v['planned']}" for n, v in prog.items())]
         t = rd["tomorrow"]
-        tl = [f"• {l['start']} עד {l['end']} {l['course']}" for l in t["lessons"]] + [f"• {s['start']} {s['title']}" for s in t["sessions"]]
+        tn = dup_numbers([s["title"] for s in t["sessions"]])
+        tl = [f"• {l['start']} עד {l['end']} {l['course']}" for l in t["lessons"]] + \
+             [f"• {s['start']} {s['title']}" + (f" ({n})" if n else "") for s, n in zip(t["sessions"], tn)]
         if getattr(self, "_feed_error", None):
             lines += ["", "⚠️ לא הצלחתי לקרוא את המערכת עכשיו, אז השיעורים של מחר אולי חסרים."]
         lines += ["", f"מחר · {t['day']} {date.fromisoformat(t['date']).day}.{date.fromisoformat(t['date']).month}:"] + (tl or ["• יום פנוי"])
@@ -831,62 +925,91 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             return
         self.st["bot"]["msgs"][f"daily:{today.isoformat()}"] = {"keys": keys}
         idx = {x["key"]: x for x in self.st["sessions"]}
-        lines = ["🗓 סמן מה בוצע בסוף השבוע (מה שלא יסומן עד הבוקר ישובץ מחדש):"] + [self.sess_line(idx[k]) for k in keys]
+        lines = ["🗓 סמן מה בוצע בסוף השבוע (מה שלא יסומן עד הבוקר ישובץ מחדש):"] + self.sess_lines([idx[k] for k in keys])
         mid = self.tg.send("\n".join(lines), self.daily_buttons(today))
         self.st["bot"]["msgs"][str(mid)] = {"type": "daily", "date": today.isoformat()}
+
+    def job_reinforce(self, today: date):
+        text = P.weak_report(self.st, today)
+        if text:                      # אין נושא חלש: לא שולחים כלום
+            self.tg.send(text)
 
     def job_weekend(self, today: date):
         self.ask_weekend(today)
 
+    def week_summary(self, ws: date, today: date, uni) -> tuple[dict, list[str]]:
+        """שורת סיכום + בלוקים 📈 📚 📝 🔍. קריאה בלבד (משמש גם את "סיכום שבוע" לפי בקשה)."""
+        rep = P.week_report(ws, self.st, self.now, uni)
+        lines = [f"📊 סיכום שבוע {ws.day}.{ws.month} עד {today.day}.{today.month}: {rep['verdict']}"]
+        # 📈 מספרים
+        if rep["total_planned"]:
+            per = " · ".join(f"{n} {v['done']}/{v['planned']}" + ("" if v["done"] >= v["planned"] > 0 else "⚠️")
+                             for n, v in rep["by_course"].items() if v["planned"] or v["done"])
+            lines += ["", f"📈 בוצעו {rep['total_done']} מתוך {rep['total_planned']}", per]
+            if rep["suggest_lighter_load"]:
+                lines.append("שבועיים ברצף מתחת ל-70%. רוצה שאוריד קצת עומס בשבוע הבא?")
+        abs_ = [self.att_status(c) for c in P.COURSE_ORDER
+                if any(k.startswith(c + "|") and v in ("absent", "reserve") for k, v in self.st["bot"]["attend"].items())]
+        if abs_:
+            lines.append("🙋 " + " · ".join(abs_))
+        # 📚 נושאים שנלמדו (מהריקאפים)
+        if rep["topics_by_course"]:
+            lines += ["", "📚 מה נלמד:"] + [f"• {COURSES[c]['name']}: {'; '.join(v)[:90]}" for c, v in rep["topics_by_course"].items()]
+        # 📝 ריקאפים
+        if rep["recaps_needed"]:
+            have = rep["recaps_needed"] - len(rep["missing_recaps"])
+            lines += ["", f"📝 ריקאפים: {have} מתוך {rep['recaps_needed']} שיעורים"]
+            if rep["missing_recaps"]:
+                miss = [f"{COURSES[c]['name']} {date.fromisoformat(d).day}.{date.fromisoformat(d).month}" for c, d in rep["missing_recaps"]]
+                lines.append("חסר ריקאפ: " + ", ".join(miss[:8]) + (f" ועוד {len(miss) - 8}" if len(miss) > 8 else ""))
+        # 🔍 מה צריך חיזוק
+        if rep["weak_lines"]:
+            lines += ["", "🔍 צריך חיזוק:"] + rep["weak_lines"]
+        return rep, lines
+
     def job_weekly(self, today: date):
+        """סיכום שבוע: שורה ראשונה = משפט סיכום. אחריה 📈 מספרים, 📚 נושאים, 📝 ריקאפים, 🔍 חיזוק, 🗓 השבוע הבא."""
         uni, personal, fc, changes = self.feed_and_adopt(today)
         ws = P.week_start(today)
-        rep = P.week_report(ws, self.st, self.now)
         nxt = today + timedelta(days=1)
         buttons = []
-        lines = [f"📊 סיכום שבוע · {ws.day}.{ws.month} עד {today.day}.{today.month}"]
-        if rep["total_planned"]:
-            pct = round(100 * rep["total_done"] / rep["total_planned"])
-            lines.append(f"בוצעו {rep['total_done']} מתוך {rep['total_planned']} ({pct}%)")
-            for n, v in rep["by_course"].items():
-                ok = v["done"] >= v["planned"] and v["planned"] > 0
-                lines.append(f"{'✅' if ok else '⚠️'} {n} {v['done']}/{v['planned']}")
-        else:
-            lines.append("עוד אין נתונים לשבוע הזה.")
-        if rep["suggest_lighter_load"]:
-            lines += ["", "שבועיים ברצף מתחת ל-70%. רוצה שאוריד קצת עומס בשבוע הבא?"]
-        if self.st["bot"]["attend"]:
-            lines += ["", self.attendance_text()]
-        syl = self.syllabus_lines(P.week_start(nxt))
-        if syl:
-            lines += ["", "📖 בשבוע הבא לפי הסילבוס:"] + syl
+        rep, lines = self.week_summary(ws, today, uni)
+        # 🗓 השבוע הבא
+        lines += ["", "🗓 השבוע הבא:"]
         up = SEM.upcoming_exams(today)
         if up:
             c, dt, n = up[0]
-            lines += ["", "⏳ המבחן הקרוב: " + self.exam_line(c, dt, n)]
+            lines.append("⏳ המבחן הקרוב: " + self.exam_line(c, dt, n))
             if n <= SEM.PREP_NOTICE_DAYS and "prep-notice" not in self.st["bot"]["seeded"]:
                 self.st["bot"]["seeded"].append("prep-notice")
                 ms = date.fromisoformat(self.mar()["start"])
-                lines += [f"🎯 נשארו פחות מ-6 שבועות למבחן הראשון. מרתון המבחנים מתחיל ב-{dd(ms)}. "
-                          "כדאי לכתוב לי כבר עכשיו ימי מילואים ידועים (\"מילואים 3.1–10.1\"), כדי שהחלוקה תתחשב בהם. "
-                          "כתוב \"מרתון\" לתוכנית."]
+                lines.append(f"🎯 נשארו פחות מ-6 שבועות למבחן הראשון. מרתון המבחנים מתחיל ב-{dd(ms)}. "
+                             "כדאי לכתוב לי כבר עכשיו ימי מילואים ידועים (\"מילואים 3.1–10.1\"), כדי שהחלוקה תתחשב בהם. "
+                             "כתוב \"מרתון\" לתוכנית.")
+        syl = self.syllabus_lines(P.week_start(nxt))
+        if syl:
+            lines += ["📖 בשבוע הבא לפי הסילבוס:"] + syl
         ms = date.fromisoformat(self.mar()["start"])
         if self.mar_active(nxt) or (0 <= (ms - today).days <= 14 and self.mar()["status"] == "scheduled"):
-            lines += [""] + self.marathon_text().split("\n")[:12]
+            lines += self.marathon_text().split("\n")[:12]
             if self.mar()["status"] == "scheduled" and (ms - today).days > 0:
                 buttons.append([("⏩ להקדים בשבוע", "mar|shift|-7"), ("⏸ לדחות בשבוע", "mar|shift|7")])
-        if rep["weak_topics"]:
-            lines += ["", "🔍 חלש השבוע:"] + [f"• {w['course']}: {w.get('unclear') or w.get('topics') or ''} ({w.get('rating') or '?'}/5)" for w in rep["weak_topics"][:5]]
+        if fc["block"]:
+            lines.append("⚠️ לא שיבצתי את השבוע הבא: " + "; ".join(fc["reasons"]))
+        else:
+            p = self.sync_week(nxt, uni, personal)
+            lines += self.number_dups(P.plan_text(p).split("\n")[1:])
+            if p["capped"]:
+                lines.append("השבוע מלא (11). לא שיבצתי: " + ", ".join(x["title"] for x in p["capped"]))
+        ex = P.exc_notify(nxt, uni, personal, self.st, True)
+        for x in ex["new"]:
+            if x["type"] == "class_on_free_day":
+                continue
+            lines.append(f"• {x['text']}")
+            buttons.append([(f"👍 קיבלתי · {x['text'][:30]}", f"ack|{x['id']}")])
         fl = self.feed_lines(fc)
         if fl:
             lines += ["", "🔄 שינויים במערכת:"] + fl
-        if fc["block"]:
-            lines += ["", "⚠️ לא שיבצתי את השבוע הבא: " + "; ".join(fc["reasons"])]
-        else:
-            p = self.sync_week(nxt, uni, personal)
-            lines += ["", "🗓 השבוע הבא:"] + P.plan_text(p).split("\n")[1:]
-            if p["capped"]:
-                lines += ["השבוע מלא (11). לא שיבצתי: " + ", ".join(x["title"] for x in p["capped"])]
         try:
             tl = self.tasks_weekly(today)
         except Exception as e:  # noqa: BLE001
@@ -894,12 +1017,6 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             tl = []
         if tl:
             lines += [""] + tl
-        ex = P.exc_notify(nxt, uni, personal, self.st, True)
-        for x in ex["new"]:
-            if x["type"] == "class_on_free_day":
-                continue
-            lines.append(f"• {x['text']}")
-            buttons.append([(f"👍 קיבלתי · {x['text'][:30]}", f"ack|{x['id']}")])
         if rep["weeks_since_start"] == 2:
             cl, cb = self.calibration_lines(ws)
             lines += [""] + cl
@@ -982,6 +1099,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             d = parts[1]
             meta = self.st["bot"]["msgs"].get(str(mid), {})
             for c in meta.get("courses", []):
+                if self.st["bot"]["attend"].get(f"{c}|{d}") != "present":
+                    continue          # דירוג רק לשיעורים שהיית בהם
                 if not any(r["date"] == d and r["course"] == c for r in self.st["recaps"]):
                     self.add_recap(d, c, rating=5)
             reply = "נרשם. יום טוב!"
@@ -1028,6 +1147,17 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             meta = self.st["bot"]["msgs"].get(str(mid), {})
             if meta.get("type") == "recap":
                 self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [c])))
+            if v == "absent":
+                note = self.propose_makeup(c, d)
+                if note:
+                    self.tg.send(note)
+        elif kind == "attall":
+            d = parts[1]
+            meta = self.st["bot"]["msgs"].get(str(mid), {})
+            for c in meta.get("courses", []):
+                self.st["bot"]["attend"].setdefault(f"{c}|{d}", "present")
+            reply = "🙋 נרשם. עכשיו דירוג הבנה"
+            self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [])))
         elif kind == "pp":
             _, act, pid = parts
             reply = self.exec_personal(pid) if act == "ok" else self.cancel_personal(pid)
@@ -1143,10 +1273,27 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         if cmd in ("/absences", "היעדרויות", "נוכחות"):
             self.tg.send(self.attendance_text())
             return
+        view = "" if cmd else view_intent(text)
+        if view:
+            self.remember("u", text)
+            if view == "day_sum":
+                self.job_daily(today)
+            elif view == "week_sum":
+                uni, _ = self.load_uni()
+                self.tg.send("\n".join(self.week_summary(P.week_start(today), today, uni)[1]))
+            elif view == "day_plan":
+                self.tg.send(self.day_text(today))
+            elif view == "tomorrow_plan":
+                self.tg.send(self.day_text(today + timedelta(days=1)))
+            else:
+                cmd = "שבוע"
+            if cmd != "שבוע":
+                return
         if cmd in ("/week", "שבוע"):
             uni, _ = self.load_uni()
             p = P.plan_week(P.week_start(today), uni, self.load_personal(P.week_start(today)), self.st)
-            self.tg.send(P.plan_text(p))
+            pt = P.plan_text(p).split("\n")
+            self.tg.send("\n".join(pt[:1] + self.number_dups(pt[1:])))
             return
         self.free_text(text)
 
@@ -1208,7 +1355,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         uni, _ = self.load_uni()
         if getattr(self, "_feed_error", None):
             return f"⚠️ {self._feed_error}"
-        lines = [f"📅 {dd(d)}"] + self.lessons_lines(uni, d) + [self.sess_line(s) for s in self.sessions_on(d)]
+        lines = [f"📅 {dd(d)}"] + self.lessons_lines(uni, d) + self.sess_lines(self.sessions_on(d))
         return "\n".join(lines) if len(lines) > 1 else f"📅 {dd(d)}: אין שיעורים ואין סשנים."
 
     def context_for_llm(self) -> str:
@@ -1559,7 +1706,10 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                                slots, why, ref=P.iso(self.now)[:16])
             return ""
         if act == "attendance":
-            return "🙋 " + self.set_attendance(a.get("course"), a.get("date") or self.now.date().isoformat(), a.get("status"))
+            d = a.get("date") or self.now.date().isoformat()
+            out = "🙋 " + self.set_attendance(a.get("course"), d, a.get("status"))
+            note = self.propose_makeup(a.get("course"), d) if a.get("status") == "absent" else ""
+            return out + (f"\n{note}" if note else "")
         if act == "personal":
             return self.propose_personal(a)
         if act == "cancel_proposal":
@@ -1931,10 +2081,12 @@ PLANNING_RULES = ("אחרי כל שיעור הבוט משבץ חזרה (סשן �
 
 HELP = """אני בוט הלימודים שלך 📚
 • בבוקר (7:44): מה יש היום, שינויים במערכת, מיילים חשובים מהאוניברסיטה, מה צריך החלטה.
-• 20 דק׳ אחרי השיעור האחרון: ריקאפ. ציון וכפתורי נוכחות, ואת השאר כותבים חופשי.
-• 21:30: מה בוצע היום, ומה מחר. מוצ״ש 21:00: סיכום שבוע ותוכנית לשבוע הבא.
+• 20 דק׳ אחרי השיעור האחרון: ריקאפ. קודם נוכחות, ואחרי "הייתי" ציון הבנה. "לא הייתי" = הצעה לסשן השלמה.
+• 21:30: מה בוצע היום, ומה מחר. שני וחמישי 21:45: 💪 מה צריך חיזוק. מוצ״ש 21:00: סיכום שבוע ותוכנית לשבוע הבא.
 
 פקודות: היום · מחר · שבוע · מבחנים · מרתון · משימות · היעדרויות · בדיקה · למה
+"סיכום" (או "סכם לי את היום") = סיכום יום · "סיכום שבוע" = איך עובר השבוע
+"תכנון" (או "מה התכנון להיום") = הלו"ז של היום · "מה התכנון לשבוע" = תוכנית השבוע
 
 אפשר לכתוב חופשי, למשל:
 "עשיתי את מתמטיקה" · "תזיז את כלכלה של מחר ל-10:00" · "מטלה באקסל עד 5.11, שעתיים"

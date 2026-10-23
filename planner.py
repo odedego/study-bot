@@ -310,7 +310,7 @@ class Session:
     label: str = ""          # כותרת לסשנים שאינם חזרה על שיעור (חיזוק, מטלה, מרתון)
 
     def title(self) -> str:
-        if self.kind in LABEL_KINDS:
+        if self.kind in LABEL_KINDS or (self.kind != "weekly" and not self.lesson_day):
             return self.label or f"📚 {COURSES[self.course]['name']}"
         if self.kind == "weekly":
             names = " + ".join(COURSES[c]["name"] for c in self.courses)
@@ -852,7 +852,7 @@ def reschedule(today: date, uni: Uni, personal: list[Ev], state: dict, now: date
             base = base_key(m["key"])
             why = "דיווחת שלא בוצע" if m.get("status") == "missed" else "לא אושר כבוצע"
             s = Session(f"re:{base}@{day.isoformat()}", "rescheduled", m["course"], [m["course"]], st, en,
-                        date.fromisoformat(m["lesson_day"]),
+                        date.fromisoformat(m["lesson_day"]) if m.get("lesson_day") else None,
                         note=f"שובץ מחדש: הסשן ב-{fmt_d(datetime.fromisoformat(m['start']).date())} {why}. אם כבר עשית, סמן ואמחק.")
             existing.append(s)
             added_per_day[day] += 1
@@ -1105,7 +1105,7 @@ def review_data(d: date, uni: Uni, personal: list[Ev], st: dict) -> dict:
     }
 
 
-def week_report(ws: date, st: dict, now: datetime | None = None) -> dict:
+def week_report(ws: date, st: dict, now: datetime | None = None, uni: "Uni | None" = None) -> dict:
     """סיכום שבוע לסקירה השבועית: בוצע מול מתוכנן, נושאים חלשים, נושאים לרענון."""
     now = now or datetime.now(TZ)
     we = ws + timedelta(days=7)
@@ -1145,7 +1145,23 @@ def week_report(ws: date, st: dict, now: datetime | None = None) -> dict:
     rate = tot_d / tot_p if tot_p else None
     prev_rate = prev_d / prev_p if prev_p else None
     burnout = rate is not None and prev_rate is not None and rate < 0.7 and prev_rate < 0.7
-    return {"week_start": ws.isoformat(), "by_course": by_course, "total_planned": tot_p, "total_done": tot_d,
+    # ריקאפים: לכל שיעור שהתקיים השבוע (עד עכשיו) יש ריקאפ? היעדרות/מילואים = אין צורך בריקאפ
+    attend = st.get("bot", {}).get("attend", {})
+    rc_keys = {(r.get("course"), r.get("date")) for r in recaps}
+    held = sorted({(l.course, l.day.isoformat()) for l in (uni.lessons if uni else [])
+                   if ws <= l.day < we and l.end <= now}, key=lambda x: (x[1], COURSE_ORDER.index(x[0])))
+    need = [x for x in held if attend.get(f"{x[0]}|{x[1]}") in (None, "present")]
+    missing = [x for x in need if x not in rc_keys]
+    topics: dict[str, list[str]] = {}
+    for r in sorted(recaps, key=lambda r: r.get("date", "")):
+        if ws.isoformat() <= r.get("date", "") < we.isoformat() and (r.get("topics") or "").strip() and r.get("course") in COURSES:
+            topics.setdefault(r["course"], []).append(r["topics"].strip())
+    weak_now = weak_data(st, min(now.date(), we - timedelta(days=1)), 7)
+    verdict = _verdict(tot_d, tot_p, weak_now[0]["course"] if weak_now else None, len(missing))
+    return {"verdict": verdict, "lessons_held": held, "recaps_needed": len(need), "missing_recaps": missing,
+            "topics_by_course": {c: topics[c] for c in COURSE_ORDER if c in topics},
+            "weak_lines": weak_lines(st, min(now.date(), we - timedelta(days=1)), 7, 3),
+            "week_start": ws.isoformat(), "by_course": by_course, "total_planned": tot_p, "total_done": tot_d,
             "completion_rate": round(rate, 2) if rate is not None else None,
             "weak_topics": [{"course": name(r["course"]), "date": r["date"], "rating": r.get("rating"),
                              "topics": r.get("topics"), "unclear": r.get("unclear")} for r in weak],
@@ -1153,6 +1169,66 @@ def week_report(ws: date, st: dict, now: datetime | None = None) -> dict:
             "suggest_lighter_load": burnout,
             "open_assignments": [a for a in st.get("assignments", []) if a.get("status") != "done"],
             "weeks_since_start": (ws - date(2026, 10, 18)).days // 7}
+
+
+def _verdict(done: int, planned: int, weakest: str | None, missing_recaps: int) -> str:
+    """משפט אחד שמסכם את השבוע."""
+    if not planned:
+        return "עוד אין נתונים לשבוע הזה."
+    pct = round(100 * done / planned)
+    head = ("שבוע מצוין" if pct >= 90 else "שבוע טוב" if pct >= 70 else "שבוע חלקי" if pct >= 50 else "שבוע חלש")
+    tail = f"; הכי צריך חיזוק: {COURSES[weakest]['name']}" if weakest else ("; חסרים ריקאפים" if missing_recaps else "")
+    return f"{head}: {done} מתוך {planned} סשנים ({pct}%){tail}."
+
+
+def weak_data(st: dict, today: date, days: int = 14) -> list[dict]:
+    """מה צריך חיזוק: לכל קורס, ריקאפים בציון הבנה נמוך (עד 3) וסשנים שלא בוצעו, ב-days הימים האחרונים.
+    ממוין מהחלש ביותר. ציון: (4 - הבנה) לכל ריקאפ חלש, ועוד 1 לכל סשן שלא בוצע."""
+    lo, hi = (today - timedelta(days=days)).isoformat(), today.isoformat()
+    per: dict[str, dict] = {}
+
+    def row(c):
+        return per.setdefault(c, {"course": c, "score": 0, "ratings": [], "topics": [], "missed": 0})
+    for r in st.get("recaps", []):
+        c, rt = r.get("course"), r.get("rating")
+        if c in COURSES and rt and rt <= 3 and lo <= r.get("date", "") <= hi:
+            x = row(c)
+            x["score"] += 4 - rt
+            x["ratings"].append(rt)
+            t = (r.get("unclear") or r.get("topics") or "").strip()
+            if t:
+                x["topics"].append(t)
+    done = {s["key"] for s in st.get("sessions", []) if s.get("status") == "done"}
+    for s in st.get("sessions", []):
+        c = s.get("course")
+        # שלא בוצע: סומן ❌, לא נמצא לו מקום, או הוזז והשלמה שלו עוד לא בוצעה
+        miss = s.get("status") in ("missed", "unplaced") or (s.get("status") == "rescheduled" and s.get("moved_to") not in done)
+        if c in COURSES and miss and lo <= s.get("start", "")[:10] <= hi:
+            x = row(c)
+            x["score"] += 1
+            x["missed"] += 1
+    return sorted(per.values(), key=lambda x: (-x["score"], min(x["ratings"] or [6]), COURSE_ORDER.index(x["course"])))
+
+
+def weak_lines(st: dict, today: date, days: int = 14, limit: int = 5) -> list[str]:
+    out = []
+    for x in weak_data(st, today, days)[:limit]:
+        bits = []
+        if x["ratings"]:
+            bits.append(f"הבנה {min(x['ratings'])}/5")
+        if x["missed"]:
+            bits.append("סשן אחד לא בוצע" if x["missed"] == 1 else f"{x['missed']} סשנים לא בוצעו")
+        t = "; ".join(dict.fromkeys(x["topics"]))
+        out.append(f"• {COURSES[x['course']]['name']}: " + " · ".join(bits) + (f" ({t[:60]})" if t else ""))
+    return out
+
+
+def weak_report(st: dict, today: date, days: int = 14) -> str:
+    """הודעת "💪 מה צריך חיזוק": קצרה, מהחלש לחזק. ריק = אין מה לחזק."""
+    lines = weak_lines(st, today, days)
+    if not lines:
+        return ""
+    return "\n".join(["💪 מה צריך חיזוק (שבועיים אחרונים)"] + lines + ["", "רוצה סשן חיזוק? כתוב לי למשל \"תוסיף חיזוק במתמטיקה מחר\"."])
 
 
 # ---------------------------------------------------------------- calendar <-> state
