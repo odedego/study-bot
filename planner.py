@@ -707,7 +707,7 @@ def feed_check(uni: Uni, raw_count: int | None, st: dict, today: date, now: date
             res["cancelled"].append((k, v))
         elif v["st"] == "on" and (p["start"], p["end"], p["loc"]) != (v["start"], v["end"], v["loc"]):
             what = "שעה" if (p["start"], p["end"]) != (v["start"], v["end"]) else "מיקום"
-            res["changed"].append({"key": k, "text": f"{_lk_label(k, v)}: {what} השתנה ({p['start']}–{p['end']} {p['loc']} → {v['start']}–{v['end']} {v['loc']})"})
+            res["changed"].append({"key": k, "text": f"{_lk_label(k, v)}: {what} השתנה ({p['start']} עד {p['end']} {p['loc']} → {v['start']} עד {v['end']} {v['loc']})"})
     for k, p in prev.items():
         if k.split(":")[1] < today.isoformat() or k in cur or p["st"] != "on":
             continue
@@ -757,7 +757,7 @@ def exceptions(start: date, days: int, uni: Uni, personal: list[Ev], plan_sessio
         slot = (l.start.weekday(), fmt_t(l.start))
         if slot not in pattern.get(l.course, set()):
             out.append({"date": l.day.isoformat(), "type": "moved_or_extra",
-                        "text": f"{COURSES[l.course]['name']} ({l.kind}) במועד לא רגיל: {HEB_DAY[l.start.weekday()]} {fmt_d(l.day)} {fmt_t(l.start)}–{fmt_t(l.end)}, {l.location}"})
+                        "text": f"{COURSES[l.course]['name']} ({l.kind}) במועד לא רגיל: {HEB_DAY[l.start.weekday()]} {fmt_d(l.day)} {fmt_t(l.start)} עד {fmt_t(l.end)}, {l.location}"})
         if l.start.weekday() in CONFIG["free_weekdays"]:
             out.append({"date": l.day.isoformat(), "type": "class_on_free_day",
                         "text": f"שיעור ביום {HEB_DAY[l.start.weekday()]} {fmt_d(l.day)} (יום שבדרך כלל חופשי): {COURSES[l.course]['name']}"})
@@ -1245,7 +1245,7 @@ def exc_notify(today: date, uni: Uni, personal: list[Ev], st: dict, write: bool)
 # ---------------------------------------------------------------- text output
 def plan_text(p: dict) -> str:
     ws = date.fromisoformat(p["week_start"])
-    out = [f"שבוע {fmt_d(ws)}–{fmt_d(ws + timedelta(days=6))}"]
+    out = [f"שבוע {fmt_d(ws)} עד {fmt_d(ws + timedelta(days=6))}"]
     by_day = defaultdict(list)
     for s in p["sessions"]:
         by_day[datetime.fromisoformat(s["start"]).date()].append(s)

@@ -131,7 +131,7 @@ class ExtrasMixin:
         lines = [f"💡 {p['reason']}"]
         for a, b in p["slots"]:
             a, b = datetime.fromisoformat(a), datetime.fromisoformat(b)
-            lines.append(f"• {_dd(a.date())} {P.fmt_t(a)}–{P.fmt_t(b)} · {p['label']}")
+            lines.append(f"• {_dd(a.date())} {P.fmt_t(a)} עד {P.fmt_t(b)} · {p['label']}")
         return "\n".join(lines)
 
     def cancel_extra(self, xid: str) -> str:
@@ -291,7 +291,7 @@ class ExtrasMixin:
         if first > d1:
             raise ValueError("התאריכים כבר עברו")
         every = [first + timedelta(days=i) for i in range((d1 - first).days + 1)]   # כולל שבת
-        rng = f"{_dd(every[0])}–{_dd(every[-1])}"
+        rng = f"{_dd(every[0])} עד {_dd(every[-1])}"
         if n is None and not free:
             self.st["pending_questions"].append({"id": f"cap-{first.isoformat()}", "text": f"קיבולת {rng}: {a.get('text', '')}",
                                                  "asked": P.iso(self.now)})

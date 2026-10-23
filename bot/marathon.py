@@ -284,7 +284,7 @@ class MarathonMixin:
         for d in days:
             m["blocked"][d.isoformat()] = reason or "חסום"
         dropped = self.mar_drop_days(days, f"{reason or 'חסום'} (דיווחת)")
-        span = _dd(a) if a == b else f"{_dd(a)}–{_dd(b)}"
+        span = _dd(a) if a == b else f"{_dd(a)} עד {_dd(b)}"
         msg = f"🎖️ רשמתי: {span} {reason or 'חסום'}. בימים האלה אין סשני מרתון"
         if dropped:
             msg += f" (הורדתי מהיומן {dropped})"
