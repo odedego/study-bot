@@ -35,7 +35,7 @@ class ExtrasMixin:
         n = sum(1 for s in self.st["sessions"] if s.get("kind") in EXTRA_KINDS and s.get("status") in ("planned", "done", "missed")
                 and ws.isoformat() <= s["start"][:10] < we.isoformat())
         for xid, p in self.st["bot"].get("xp", {}).items():
-            if xid != skip and self._xp_live(p):
+            if xid != skip and self._xp_live(p) and p.get("kind") in EXTRA_KINDS:
                 n += sum(1 for a, _ in p["slots"] if ws.isoformat() <= a[:10] < we.isoformat())
         return n
 
@@ -111,9 +111,12 @@ class ExtrasMixin:
         return out
 
     # ------------------------------------------------------------ proposals
-    def propose_extra(self, kind: str, course: str, label: str, note: str, slots: list, reason: str, ref: str = "") -> str:
+    def propose_extra(self, kind: str, course: str, label: str, note: str, slots: list, reason: str, ref: str = "",
+                      lesson_day: str | None = None) -> str:
         p = {"kind": kind, "course": course, "label": label, "note": note, "reason": reason, "ref": ref,
              "slots": [(P.iso(a), P.iso(b)) for a, b in slots], "state": "pending", "at": P.iso(self.now)}
+        if lesson_day:
+            p["lesson_day"] = lesson_day     # השלמה (rescheduled): הכותרת והשיבוץ מחדש צריכים את יום השיעור
         xid = P.exc_id(f"{kind}{course}{ref}{p['slots']}")[:8]
         if xid in self.st["bot"].setdefault("xp", {}):
             return xid
@@ -123,7 +126,9 @@ class ExtrasMixin:
 
     def _send_xp(self, xid: str):
         p = self.st["bot"]["xp"][xid]
-        text = self._xp_text(p).replace("\n", "\nהצעה:\n", 1) + f"\n(מעבר ל-11 הסשנים הרגילים. עד {EXTRA_WEEKLY_MAX} תוספות בשבוע.)"
+        text = self._xp_text(p).replace("\n", "\nהצעה:\n", 1)
+        if p.get("kind") in EXTRA_KINDS:
+            text += f"\n(מעבר ל-11 הסשנים הרגילים. עד {EXTRA_WEEKLY_MAX} תוספות בשבוע.)"
         p["send_try"] = p.get("send_try", 0) + 1     # נכשל? resend_undelivered ינסה שוב (עד 3), אחרת "failed"
         p["mid"] = self.tg.send(text, [[("✅ שבץ", f"xp|ok|{xid}"), ("✖️ לא צריך", f"xp|no|{xid}")]])
 
@@ -131,7 +136,7 @@ class ExtrasMixin:
         lines = [f"💡 {p['reason']}"]
         for a, b in p["slots"]:
             a, b = datetime.fromisoformat(a), datetime.fromisoformat(b)
-            lines.append(f"• {_dd(a.date())} {P.fmt_t(a)}–{P.fmt_t(b)} · {p['label']}")
+            lines.append(f"• {_dd(a.date())} {P.fmt_t(a)} עד {P.fmt_t(b)} · {p['label']}")
         return "\n".join(lines)
 
     def cancel_extra(self, xid: str) -> str:
@@ -189,7 +194,8 @@ class ExtrasMixin:
         made = p.setdefault("made", [])
         for i, (a, b) in enumerate(final):
             key = self.unique_key(f"{p['kind']}:{p['course']}:{p.get('ref') or xid}:{i + 1}@{a.date().isoformat()}")
-            sess = P.Session(key, p["kind"], p["course"], [p["course"]], a, b, None, note=p["note"], label=p["label"])
+            ld = date.fromisoformat(p["lesson_day"]) if p.get("lesson_day") else None
+            sess = P.Session(key, p["kind"], p["course"], [p["course"]], a, b, ld, note=p["note"], label=p["label"])
             js = sess.to_json()
             eid = self.create_event(js)
             self.st["sessions"].append({k: js[k] for k in ("key", "kind", "course", "courses", "start", "end", "lesson_day", "note", "label")}
@@ -291,7 +297,7 @@ class ExtrasMixin:
         if first > d1:
             raise ValueError("התאריכים כבר עברו")
         every = [first + timedelta(days=i) for i in range((d1 - first).days + 1)]   # כולל שבת
-        rng = f"{_dd(every[0])}–{_dd(every[-1])}"
+        rng = f"{_dd(every[0])} עד {_dd(every[-1])}"
         if n is None and not free:
             self.st["pending_questions"].append({"id": f"cap-{first.isoformat()}", "text": f"קיבולת {rng}: {a.get('text', '')}",
                                                  "asked": P.iso(self.now)})
@@ -354,6 +360,9 @@ class ExtrasMixin:
         return out
 
     def _move_surplus(self, day: date, max_sessions: int) -> str:
+        """עודד החליט כמה סשנים יש ביום (capacity): מבצעים בלי לשאול, ומדווחים מה השתנה ("עודכן").
+        מה שאפשר מוזז; מה שאין לו מקום יורד מהיום הזה, ואם יש משבצת פנויה נשלחת הצעה להשלמה (באישור, בלי תקציב התוספות)."""
+        from bot.core import strip_marks
         d = day.isoformat()
         extra = self._cap_sessions(d)[max_sessions:]
         out, moving = [], []
@@ -374,10 +383,10 @@ class ExtrasMixin:
                     out.append(f"• {title} → {_dd(a.date())} {P.fmt_t(a)}")
                 else:
                     self._drop(s, f"פינית את {_dd(day)}.")
-                    out.append(f"• {title}: לא מצאתי זמן אחר, הורד")
+                    out.append(f"• {title}: לא מצאתי זמן אחר, הורד מהיומן")
             else:   # מרתון: החלוקה מתעדכנת לבד
                 self._drop(s, f"פינית את {_dd(day)}.")
-                out.append(f"• {title}: הורד, אשבץ במקום אחר בתוכנית המרתון")
+                out.append(f"• {title}: הורד מהיומן, אשבץ במקום אחר בתוכנית המרתון")
         if moving:
             uni, _ = self.load_uni()
             personal = list(self.load_personal(P.week_start(self.now.date())))
@@ -394,22 +403,22 @@ class ExtrasMixin:
                 self.set_event_id(x["key"], self.create_event(x))
                 if x.get("from_eventId"):
                     try:
-                        from bot.core import strip_marks
                         self.cal.patch(self.reviews_cal, x["from_eventId"], {"summary": "↪️ " + strip_marks(x["from_title"])})
                     except Exception:  # noqa: BLE001
                         pass
                 a = datetime.fromisoformat(x["start"])
-                out.append(f"• {x['from_title']} → {_dd(a.date())} {P.fmt_t(a)}")
+                out.append(f"• {strip_marks(x['from_title'])} → {_dd(a.date())} {P.fmt_t(a)}")
             idx = {x["key"]: x for x in self.st["sessions"]}
             for x in r["not_placed"]:
-                s0 = idx.get(x["key"])
-                if s0 and s0.get("eventId"):
-                    try:
-                        self.cal.delete(self.reviews_cal, s0["eventId"])   # לא משאירים אותו ביום שפינית
-                    except Exception as e:  # noqa: BLE001
-                        self.log.append(f"capacity delete: {e}")
-                out.append(f"• {x['title']}: לא מצאתי מקום השבוע, הורד מהיומן ועובר לחזרה השבועית")
-        return f"✅ השארתי ב-{_dd(day)} {max_sessions} סשנים. הזזתי:\n" + "\n".join(out)
+                # עודד פינה את היום: האירוע יורד ממנו (החלטה שלו). שיבוץ במקום אחר = רק הצעה לאישור.
+                s = idx.get(x["key"])
+                if s:
+                    self._drop(s, f"פינית את {_dd(day)}.")
+                offered = self.propose_unplaced(x["key"], strip_marks(x["title"]), self.now.date())
+                out.append(f"• {strip_marks(x['title'])}: לא מצאתי מקום השבוע, הורד מהיומן"
+                           + ("; שלחתי הצעה למועד אחר" if offered else ""))
+        left = "אין סשנים" if max_sessions == 0 else "נשאר סשן אחד" if max_sessions == 1 else f"נשארו {max_sessions} סשנים"
+        return f"✅ עודכן: ב-{_dd(day)} {left}. מה השתנה:\n" + "\n".join(out)
 
     def _drop(self, s: dict, note: str):
         s["status"] = "dropped"

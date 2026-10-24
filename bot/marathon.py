@@ -76,7 +76,7 @@ class MarathonMixin:
     def mar_user_deleted(self, c: str) -> int:
         """סשני מרתון שעודד מחק ביומן: החלטה שלו. לא משבצים אותם מחדש במקום אחר."""
         return sum(1 for s in self.st["sessions"] if s.get("kind") == "marathon" and s.get("course") == c
-                   and s.get("status") == "dropped" and str(s.get("note", "")).startswith("נמחק ממך"))
+                   and s.get("status") == "dropped" and str(s.get("note", "")).startswith(("נמחק ממך", "בוטל לבקשתך")))
 
     def mar_best(self, c: str):
         sc = self.mar()["scores"].get(c, [])
@@ -256,8 +256,9 @@ class MarathonMixin:
         m["committed"] = sorted(set(m["committed"]))[-60:]
         return [f"➕ מרתון: נוספו ליומן {n} סשנים ב-{_dd(d)}" for d, n in sorted(made.items())]
 
-    def mar_drop_days(self, days: list[date], reason: str, course: str | None = None) -> int:
-        n = 0
+    def mar_drop_days(self, days: list[date], reason: str, course: str | None = None) -> list[dict]:
+        """רק מבקשה של עודד (ימים חסומים, או "לפנות" אחרי שליטה): מוחק בלי לשאול, והקורא מדווח מה ירד."""
+        out = []
         for s in self.st["sessions"]:
             if s.get("kind") == "marathon" and s.get("status") == "planned" and datetime.fromisoformat(s["start"]) > self.now \
                     and date.fromisoformat(s["start"][:10]) in days and (course is None or s.get("course") == course):
@@ -268,8 +269,8 @@ class MarathonMixin:
                         self.cal.delete(self.reviews_cal, s["eventId"])
                     except Exception as e:  # noqa: BLE001
                         self.log.append(f"marathon drop: {e}")
-                n += 1
-        return n
+                out.append(s)
+        return out
 
     # ------------------------------------------------------------ actions (מהודעות חופשיות)
     def mar_block(self, start: str, end: str | None, reason: str) -> str:
@@ -284,14 +285,15 @@ class MarathonMixin:
         for d in days:
             m["blocked"][d.isoformat()] = reason or "חסום"
         dropped = self.mar_drop_days(days, f"{reason or 'חסום'} (דיווחת)")
-        span = _dd(a) if a == b else f"{_dd(a)}–{_dd(b)}"
-        msg = f"🎖️ רשמתי: {span} {reason or 'חסום'}. בימים האלה אין סשני מרתון"
+        span = _dd(a) if a == b else f"{_dd(a)} עד {_dd(b)}"
+        msg = f"🎖️ רשמתי: {span} {reason or 'חסום'}. בימים האלה אין סשני מרתון."
         if dropped:
-            msg += f" (הורדתי מהיומן {dropped})"
+            msg += f"\n🗑 עודכן: הורדתי מהיומן {len(dropped)} סשנים:\n" + "\n".join(self.drop_lines(dropped)[:8]) \
+                + (f"\n(ועוד {len(dropped) - 8})" if len(dropped) > 8 else "")
         _, short = self.mar_allocate()
         if short and date.fromisoformat(m["start"]) <= b + timedelta(days=60):
-            msg += ".\n⚠️ " + self.mar_short_text(short)
-        return msg + "."
+            msg += "\n⚠️ " + self.mar_short_text(short)
+        return msg
 
     def mar_unblock(self, start: str, end: str | None) -> str:
         a = date.fromisoformat(start)
@@ -333,11 +335,14 @@ class MarathonMixin:
             return f"⚠️ לא פיניתי: אני לא מצליח לקרוא את המערכת עכשיו ({why[:60]}). נסה שוב עוד מעט."
         later = self._mar_future(c)
         days = sorted({date.fromisoformat(s["start"][:10]) for s in later})
-        n = self.mar_drop_days(days, "פונה אחרי שליטה", c) if days else 0
+        gone = self.mar_drop_days(days, "פונה אחרי שליטה", c) if days else []
         m = self.mar()
         m["committed"] = [x for x in m["committed"] if date.fromisoformat(x) not in days]
-        self.mar_commit()
-        return f"🔄 פיניתי {n} סשנים ושיבצתי מחדש."
+        made = self.mar_commit()
+        if not gone:
+            return "🔄 לא היו סשנים לפנות."
+        return (f"🔄 פיניתי {len(gone)} סשנים ושיבצתי מחדש.\n🗑 עודכן: ירדו מהיומן:\n" + "\n".join(self.drop_lines(gone)[:8])
+                + ("\n" + "\n".join(x for x in made if not x.startswith("⚠️")) if made else ""))
 
     def mar_set_need(self, c: str, n) -> str:
         if c not in COURSES:

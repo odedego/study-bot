@@ -82,7 +82,7 @@ def main():
     check(len(out) == 2 and out[0]["text"].startswith("זיהיתי חתונה") and out[1]["text"].startswith("🗓️"),
           "explanation first, then the proposal with buttons")
     pm = out[-1]
-    check("📍 אולמי הגן" in pm["text"] and "19:30–23:30" in pm["text"] and "חופה 20:30" in pm["text"], "proposal shows place, time and details")
+    check("📍 אולמי הגן" in pm["text"] and "19:30 עד 23:30" in pm["text"] and "חופה 20:30" in pm["text"], "proposal shows place, time and details")
     check(not cal.cals.get(PERS), "nothing written before approval")
     press_ok(pm)
     ev = list(cal.cals.get(PERS, {}).values())
@@ -188,7 +188,7 @@ def main():
     llm2.script.append({"reply": "", "actions": [{"action": "personal", "op": "create", "title": "ספר", "start": "2026-10-29T17:00"}]})
     tg2.user_text("תוסיף ספר בחמישי הבא ב-17")
     b2.handle_updates()
-    check("⚠️ בזמן הזה יש כלכלה (15:45–19:00)" in tg2.sent[-1]["text"], "proposal warns about the overlapping economics lesson")
+    check("⚠️ בזמן הזה יש כלכלה (15:45 עד 19:00)" in tg2.sent[-1]["text"], "proposal warns about the overlapping economics lesson")
     llm2.script.append({"reply": "", "actions": [{"action": "personal", "op": "create", "title": "ספר", "start": "2026-10-22T17:00"}]})
     tg2.user_text("תוסיף ספר בחמישי ב-17")
     b2.handle_updates()
