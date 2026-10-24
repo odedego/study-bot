@@ -360,6 +360,9 @@ class ExtrasMixin:
         return out
 
     def _move_surplus(self, day: date, max_sessions: int) -> str:
+        """עודד החליט כמה סשנים יש ביום (capacity): מבצעים בלי לשאול, ומדווחים מה השתנה ("עודכן").
+        מה שאפשר מוזז; מה שאין לו מקום יורד מהיום הזה, ואם יש משבצת פנויה נשלחת הצעה להשלמה (באישור, בלי תקציב התוספות)."""
+        from bot.core import strip_marks
         d = day.isoformat()
         extra = self._cap_sessions(d)[max_sessions:]
         out, moving = [], []
@@ -380,10 +383,10 @@ class ExtrasMixin:
                     out.append(f"• {title} → {_dd(a.date())} {P.fmt_t(a)}")
                 else:
                     self._drop(s, f"פינית את {_dd(day)}.")
-                    out.append(f"• {title}: לא מצאתי זמן אחר, הורד")
+                    out.append(f"• {title}: לא מצאתי זמן אחר, הורד מהיומן")
             else:   # מרתון: החלוקה מתעדכנת לבד
                 self._drop(s, f"פינית את {_dd(day)}.")
-                out.append(f"• {title}: הורד, אשבץ במקום אחר בתוכנית המרתון")
+                out.append(f"• {title}: הורד מהיומן, אשבץ במקום אחר בתוכנית המרתון")
         if moving:
             uni, _ = self.load_uni()
             personal = list(self.load_personal(P.week_start(self.now.date())))
@@ -400,17 +403,22 @@ class ExtrasMixin:
                 self.set_event_id(x["key"], self.create_event(x))
                 if x.get("from_eventId"):
                     try:
-                        from bot.core import strip_marks
                         self.cal.patch(self.reviews_cal, x["from_eventId"], {"summary": "↪️ " + strip_marks(x["from_title"])})
                     except Exception:  # noqa: BLE001
                         pass
                 a = datetime.fromisoformat(x["start"])
-                out.append(f"• {x['from_title']} → {_dd(a.date())} {P.fmt_t(a)}")
+                out.append(f"• {strip_marks(x['from_title'])} → {_dd(a.date())} {P.fmt_t(a)}")
             idx = {x["key"]: x for x in self.st["sessions"]}
             for x in r["not_placed"]:
-                # לא מוחקים מהיומן בלי אישור: האירוע נשאר, ומציעים משבצת חלופית (או שעודד מחליט)
-                out.append(f"• {x['title']}: לא מצאתי מקום השבוע. האירוע נשאר ביומן, תגיד אם להזיז או למחוק")
-        return f"✅ השארתי ב-{_dd(day)} {max_sessions} סשנים. הזזתי:\n" + "\n".join(out)
+                # עודד פינה את היום: האירוע יורד ממנו (החלטה שלו). שיבוץ במקום אחר = רק הצעה לאישור.
+                s = idx.get(x["key"])
+                if s:
+                    self._drop(s, f"פינית את {_dd(day)}.")
+                offered = self.propose_unplaced(x["key"], strip_marks(x["title"]), self.now.date())
+                out.append(f"• {strip_marks(x['title'])}: לא מצאתי מקום השבוע, הורד מהיומן"
+                           + ("; שלחתי הצעה למועד אחר" if offered else ""))
+        left = "אין סשנים" if max_sessions == 0 else "נשאר סשן אחד" if max_sessions == 1 else f"נשארו {max_sessions} סשנים"
+        return f"✅ עודכן: ב-{_dd(day)} {left}. מה השתנה:\n" + "\n".join(out)
 
     def _drop(self, s: dict, note: str):
         s["status"] = "dropped"

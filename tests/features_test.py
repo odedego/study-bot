@@ -208,8 +208,9 @@ def semester_part():
         s1 = st(e)
         left = [x for x in s1["sessions"] if x.get("status") == "planned" and x["start"][:10] == busy]
         check(len(left) == 1, f"one session left on {busy}")
-        check("הזזתי" in tg.sent[-1]["text"], "told what moved")
-        txt = tg.sent[-1]["text"]
+        rep = [m for m in tg.sent if m["text"].startswith("✅ עודכן")]
+        txt = rep[-1]["text"] if rep else ""
+        check("מה השתנה" in txt, "told what changed (user decision: executed and reported, no approval asked)")
         check(txt.count("• ") == by[busy] - 1, f"each removed session accounted for ({txt.count('• ')})")
         moved_ex = [x for x in s1["sessions"] if x.get("kind") in ("extra", "assign") and x["start"][:10] != busy
                     and x.get("status") == "planned" and x.get("key", "").endswith(busy)]
@@ -372,6 +373,9 @@ def marathon_part():
     tg.user_text("מילואים 3.1 עד 6.1")
     step(e)
     check("🎖️ רשמתי" in tg.sent[-1]["text"], "reserve days recorded")
+    gone = [x for x in st(e)["sessions"] if x.get("kind") == "marathon" and x.get("status") == "dropped"]
+    check(gone and "🗑 עודכן: הורדתי מהיומן" in tg.sent[-1]["text"] and tg.sent[-1]["text"].count("• ") == len(gone)
+          and not tg.sent[-1]["buttons"], f"user-decided drop: executed without asking, each removed session reported ({len(gone)})")
     run_until(e, t("2027-01-05T12:00"))
     llm.script.append({"reply": "", "actions": [{"action": "practice_exam", "course": "intro", "score": 92}]})
     tg.user_text("עשיתי מבחן תרגול במבוא, 92")
@@ -381,7 +385,7 @@ def marathon_part():
     check(fr is not None, "offers to free the intro sessions already in the calendar")
     if fr:
         press(e, fr, lambda tx, d: d == "mar|free|intro")
-        check(tg.sent[-1]["text"].startswith("🔄 פיניתי"), "freed and re-planned")
+        check(tg.sent[-1]["text"].startswith("🔄 פיניתי") and "עודכן" in tg.sent[-1]["text"], "freed and re-planned, removal reported")
     run_until(e, t("2027-01-12T21:40"))
     s = st(e)
     mar = [x for x in s["sessions"] if x.get("kind") == "marathon"]
