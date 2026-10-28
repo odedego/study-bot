@@ -286,11 +286,27 @@ def absence_part():
     p = next((v for v in s0["bot"].get("xp", {}).values() if v.get("ref") == "abs:2026-10-26"), None)
     check(p and p["kind"] == "rescheduled", "proposal kind is rescheduled")
     n = len([m for m in tg.sent if m["text"].startswith("💡")])
-    press(e, rc, lambda tx, d: d == "att|math|2026-10-26|present")
     press(e, rc, lambda tx, d: d == "att|math|2026-10-26|absent")
-    check(len([m for m in tg.sent if m["text"].startswith("💡")]) == n, "same absence again → no second proposal")
-    if xp:
-        press(e, xp, lambda tx, d: d.startswith("xp|ok"))
+    check(len([m for m in tg.sent if m["text"].startswith("💡")]) == n, "same absence pressed twice → no second proposal")
+    press(e, rc, lambda tx, d: d == "att|math|2026-10-26|present")
+    live = [v for v in st(e)["bot"].get("xp", {}).values() if v.get("ref") == "abs:2026-10-26" and v.get("state") == "pending"]
+    check(not live, "'בעצם הייתי' cancels the pending make-up proposal")
+    old = tg.msg(xp["id"])
+    check("לא שובץ" in old["text"] and not old["buttons"], "old proposal message marked cancelled, buttons removed")
+    press(e, xp, lambda tx, d: d.startswith("xp|ok"))
+    check(not [x for x in st(e)["sessions"] if x["key"].startswith("rescheduled:math:abs:")],
+          "pressing approve on the cancelled proposal books nothing")
+    check("math|2026-10-26" not in st(e)["bot"].get("makeup", []), "cancelling releases the make-up mark")
+    check(tg.find_button(rc["id"], lambda tx, d: d == "att|math|2026-10-26|absent") is None,
+          "after 'present' the recap message has no absent button (so a second absence comes from free text)")
+    b = bot_of(e)
+    b.load_state()
+    b.set_attendance("math", "2026-10-26", "absent")        # "לא הייתי" שנכתב בטקסט חופשי
+    b.propose_makeup("math", "2026-10-26")
+    b.save_state()
+    check(len([m for m in tg.sent if m["text"].startswith("💡")]) == n + 1, "absent again after present → one fresh proposal")
+    xp = last(tg, "💡")
+    press(e, xp, lambda tx, d: d.startswith("xp|ok"))
     mk = [x for x in st(e)["sessions"] if x.get("kind") == "rescheduled" and x["key"].startswith("rescheduled:math:abs:")]
     check(len(mk) == 1 and mk[0].get("lesson_day") == "2026-10-26", "approved → make-up session (kind rescheduled)")
     b = bot_of(e)

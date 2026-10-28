@@ -841,6 +841,20 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             rows.append([("✅ הכול ברור (5 לכולם)", f"rateall|{ds}")])
         return rows
 
+    def cancel_makeup(self, c: str, d: str):
+        """הצעת השלמה שעוד ממתינה לאישור על שיעור שהתברר שהיה בו: מבטלים אותה ומשחררים את הסימון,
+        כדי שהיעדרות חדשה לאותו שיעור תציע השלמה מחדש. הצעה שכבר אושרה לא נוגעים בה."""
+        xp = self.st["bot"].get("xp", {})
+        gone = False
+        for xid, p in list(xp.items()):
+            if p.get("kind") == "rescheduled" and p.get("course") == c and p.get("ref") == f"abs:{d}" \
+                    and p.get("state") == "pending":
+                self.cancel_extra(xid)
+                xp.pop(xid)
+                gone = True
+        if gone:
+            self.st["bot"]["makeup"] = [x for x in self.st["bot"].get("makeup", []) if x != f"{c}|{d}"]
+
     def propose_makeup(self, c: str, d: str) -> str:
         """היעדרות משיעור: מציעים סשן השלמה (kind=rescheduled, לא נספר בתקציב התוספות). פעם אחת לכל שיעור."""
         done = self.st["bot"].setdefault("makeup", [])
@@ -2019,6 +2033,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         key = f"{c}|{d}"
         self.st["bot"]["attend"][key] = v
         msg = f"נרשם: {COURSES[c]['name']} · {ATT_LABEL[v]}"
+        if v != "absent":
+            self.cancel_makeup(c, d)      # הוא בכל זאת היה (או מילואים): הצעת השלמה שעוד ממתינה כבר לא רלוונטית
         if v == "reserve":
             return msg + ". לא נספר כהיעדרות."
         if v == "absent":
