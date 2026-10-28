@@ -152,7 +152,7 @@ def outcome_line():
     check("דילגתי על 2 פעולות" in r and any("dropped 2" in l for l in b.log), "malformed actions are reported, not dropped silently")
     e = env({"actions": [{"action": "capacity", "date": "2026-10-29", "max_sessions": 0, "text": "x"}], "reply": ""})
     r, _ = say(e, "ביום חמישי אין לי זמן")
-    check("השארתי" in r and "ℹ️ לא שיניתי" not in r, "executed action: its own result, no 'nothing changed'")
+    check("עודכן" in r and "ℹ️ לא שיניתי" not in r, "executed action: its own result, no 'nothing changed'")
     e = env({"actions": [], "reply": "מה קורה"})
     say(e, "היי")
     b = bot_of(e)
@@ -184,7 +184,7 @@ def why_command():
     w = e["tg"].sent[-1]["text"]
     check(len(e["llm"].calls) == 1, "'למה' right after a decoded message shows what was understood (no new Claude call)")
     check(w.startswith("🔍") and "ביום חמישי אין לי זמן" in w and "capacity 2026-10-29" in w and "✅ הובנה" in w, "shows the message, status and actions")
-    check("מה קרה:" in w and "נשלחה הצעה אחת לאישור" in w, "shows what happened")
+    check("מה קרה:" in w and "עודכן" in w and "הצעות לאישור" in w, "shows what happened")
     check(ai(e)["text"].startswith("ביום חמישי"), "command does not overwrite the last analysis")
     for cmd in ("מה עשית", "/why", "מה הבנת?"):
         e["tg"].user_text(cmd)
@@ -300,7 +300,7 @@ def surplus_cases():
     e["llm"].items.append({"reply": "", "actions": [{"action": "capacity", "date": "2026-10-25", "max_sessions": 2, "text": "ביום ראשון רק 2"}]})
     r, _ = say(e, "ביום ראשון רק שתי חזרות")
     weekly = [x for x in st(e)["sessions"] if x["kind"] == "weekly" and x["status"] == "planned"]
-    check("מרתון" not in r and "השארתי" in r, f"weekly surplus message is not about the marathon ({r[:90]!r})")
+    check("מרתון" not in r and "עודכן" in r, f"weekly surplus message is not about the marathon ({r[:90]!r})")
     check(len([x for x in weekly if x["start"][:10] == "2026-10-25"]) <= 2, "Sunday is down to the limit")
     check(all(x["status"] in ("planned", "dropped") for x in st(e)["sessions"] if x["kind"] == "weekly"), "weekly sessions moved or dropped, never marked missed")
 
@@ -449,6 +449,148 @@ def parse_unit():
     check(p("[1,2]") is None and p("") is None and p(None) is None and p("{oops") is None, "garbage = None")
 
 
+REV = "reviews@cal"
+SCREENSHOT = "אני רוצה להקדים את הסיכום השבועי ולראות אותו עכשיו"
+
+
+def after(e, n):
+    return [m for m in e["tg"].sent[n:]]
+
+
+def deletion_policy():
+    print("== מחיקה: החלטה של עודד = מבצעים ומדווחים. יוזמה של הבוט = רק הצעה")
+    from bot.core import sid
+    # 1) עודד מבטל סשן במפורש: בלי כפתור אישור, נמחק מהיומן, ודיווח "עודכן"
+    e = env()
+    s0 = st(e)
+    tgt = min((x for x in s0["sessions"] if x.get("status") == "planned" and x.get("eventId") and x["start"][:10] == "2026-10-26"),
+              key=lambda x: x["start"], default=None)
+    check(tgt is not None, "a planned session tomorrow to cancel")
+    if tgt:
+        e["llm"].items.append({"actions": [{"action": "cancel", "id": sid(tgt["key"])}], "reply": "מבטל את התרגול של מחר."})
+        n = len(e["tg"].sent)
+        r, _ = say(e, "תבטל את תרגול מחר")
+        x = next(y for y in st(e)["sessions"] if y["key"] == tgt["key"])
+        check("🗑 עודכן" in r and tgt["start"][11:16] in r and "ℹ️ לא שיניתי" not in r, f"cancel reported as done ({r[-80:]!r})")
+        check(not any(m["buttons"] for m in after(e, n)), "no approval buttons for a cancel Oded asked for")
+        check(x["status"] == "dropped" and tgt["eventId"] not in e["cal"].cals[REV], "dropped and removed from the calendar")
+        run_until(e, t("2026-10-26T08:00"))
+        mb = last(e["tg"], "☀️")
+        check(tgt["eventId"] not in e["cal"].cals[REV] and next(y for y in st(e)["sessions"] if y["key"] == tgt["key"])["status"] == "dropped",
+              "the next morning does not recreate it")
+        check(mb and "נמחק ממך ביומן" not in mb["text"], "not re-reported as a calendar deletion")
+        e["llm"].items.append({"actions": [{"action": "restore", "id": sid(tgt["key"])}], "reply": "מחזיר."})
+        r, _ = say(e, "תחזיר")
+        check("↩️ הוחזר" in r and next(y for y in st(e)["sessions"] if y["key"] == tgt["key"])["status"] == "planned", "undo with 'תחזיר'")
+        e["llm"].items.append({"actions": [{"action": "cancel", "id": "nope"}], "reply": "מבטל."})
+        r, _ = say(e, "תבטל את זה")
+        check("⚠️ לא ביצעתי" in r, "unknown session id: honest failure, nothing deleted")
+
+    # 2) הבוט לבד (שבוע בלי לסמן כלום): משבץ מחדש או מציע, אבל לא מוחק שום דבר מהיומן
+    e = make_env("2026-10-24T21:00")
+    run_until(e, t("2026-10-31T08:00"), answer_daily=False)
+    ss = st(e)["sessions"]
+    check(not e["cal"].deleted, f"nothing deleted from the calendar on the bot's own initiative ({len(e['cal'].deleted)})")
+    check(not [x for x in ss if x.get("status") == "dropped"], "no session dropped without Oded")
+    check([x for x in ss if x.get("status") == "rescheduled"], "unconfirmed sessions were rescheduled instead")
+    unpl = [x for x in ss if x.get("status") == "unplaced"]
+    check(all(x.get("eventId") in e["cal"].cals[REV] or not x.get("eventId") for x in unpl),
+          f"sessions without a slot stay in the calendar ({len(unpl)})")
+    # הצעה שהבוט יוזם (השלמה) היא kind=rescheduled: כפתור אישור, ולא נספרת בתקציב התוספות
+    b = bot_of(e)
+    b.load_state()
+    ws = P.week_start(b.now.date())
+    cand = next((x for x in b.st["sessions"] if x.get("course") and x.get("kind") == "review"), None)
+    before = b.extras_in_week(ws)
+    n = len(e["tg"].sent)
+    ok = b.propose_unplaced(cand["key"], "חזרה", b.now.date()) if cand else False
+    xp = [p for p in b.st["bot"].get("xp", {}).values() if p.get("ref") == (cand or {}).get("key")]
+    check(not ok or (xp and xp[0]["kind"] == "rescheduled" and b.extras_in_week(ws) == before
+                     and any(m["buttons"] and m["buttons"][0][0][1].startswith("xp|ok") for m in after(e, n))),
+          "bot-initiated: a proposal with ✅ buttons, extras budget untouched")
+
+
+def report_now():
+    print("== \"להקדים את הסיכום השבועי ולראות עכשיו\" (צילום המסך)")
+    from bot.core import LLM_SYSTEM
+    check("send_report" in LLM_SYSTEM and SCREENSHOT in LLM_SYSTEM and "set_job_time" in LLM_SYSTEM, "actions documented for Claude")
+    # אמצע השבוע: סיכום מלא לקריאה בלבד (לא כותב את השבוע הבא ליומן, והסיכום של מוצ״ש עדיין יגיע)
+    e = env({"actions": [{"action": "send_report", "report": "weekly"}], "reply": "הנה הסיכום השבועי עד עכשיו."},
+            until="2026-10-29T16:00")
+    evs = len(e["cal"].cals[REV])
+    n = len(e["tg"].sent)
+    r, _ = say(e, SCREENSHOT)
+    msgs = after(e, n)
+    check("bot_schedule" in e["llm"].calls[-1], "Claude sees the current message schedule")
+    check("📨 שולח עכשיו: הסיכום השבועי" in r and "לא שיניתי" not in r and "אין לי" not in r, f"reply says it is sending ({r!r})")
+    rep = msgs[1]["text"] if len(msgs) > 1 else ""
+    check(rep.startswith("📊 סיכום שבוע") and "🗓 השבוע הבא:" in rep and "📈" in rep, "the full weekly summary arrives right after the reply")
+    check(len(e["cal"].cals[REV]) == evs and not st(e)["bot"]["jobs"].get("weekly:2026-10-29"), "mid-week: read-only")
+    # מוצ״ש לפני השעה: הסיכום המלא עכשיו, ולא שוב ב-21:00
+    e = env({"actions": [{"action": "send_report", "report": "weekly"}], "reply": "שולח."}, until="2026-10-31T19:00")
+    say(e, SCREENSHOT)
+    check(st(e)["bot"]["jobs"].get("weekly:2026-10-31") == "done", "Saturday: the scheduled weekly is done early")
+    run_until(e, t("2026-10-31T22:00"))
+    weekly = [m for m in e["tg"].sent if m["text"].startswith("📊 סיכום שבוע") and m["at"].date() == date(2026, 10, 31)]
+    check(len(weekly) == 1 and weekly[0]["at"] < t("2026-10-31T20:00") and "לשנות משהו בשבוע הבא" in weekly[0]["text"],
+          f"sent once, early, as the full weekly ({len(weekly)})")
+    # דוחות נוספים לפי בקשה
+    e = env({"actions": [{"action": "send_report", "report": "reinforce"}, {"action": "send_report", "report": "week_plan"},
+                         {"action": "send_report", "report": "nope"}], "reply": "שולח."})
+    n = len(e["tg"].sent)
+    r, _ = say(e, "תראה לי מה צריך חיזוק ואת התוכנית")
+    texts = [m["text"] for m in after(e, n)]
+    check(any(x.startswith("💪") for x in texts) and any(x.startswith("📅") or "שבוע" in x.split("\n")[0] for x in texts[2:]),
+          "reinforce and week plan sent on request")
+    check("⚠️ לא ביצעתי" in r, "unknown report: honest failure")
+
+
+def job_times():
+    print("== שינוי שעה של הודעה קבועה")
+    e = env({"actions": [{"action": "set_job_time", "job": "daily", "time": "20:00"}], "reply": "בסדר."},
+            {"actions": [{"action": "send_report", "report": "schedule"}], "reply": "הנה."})
+    r, _ = say(e, "תשלח לי את הסיכום היומי ב-20:00")
+    check("⏰ עודכן: הסיכום היומי יישלח ב-20:00 במקום 21:30." in r, f"old → new time confirmed ({r[-60:]!r})")
+    check(st(e)["bot"]["job_times"] == {"daily": {"time": "20:00"}}, "persisted in state")
+    run_until(e, t("2026-10-26T22:30"))
+    daily = [m for m in e["tg"].sent if m["text"].startswith("🌙") and m["at"].date() == date(2026, 10, 26)]
+    check(len(daily) == 1 and "20:00" <= daily[0]["at"].strftime("%H:%M") < "20:10", f"scheduler honours it ({[m['at'] for m in daily]})")
+    n = len(e["tg"].sent)
+    say(e, "מתי נשלחות ההודעות?")
+    sched = after(e, n)[-1]["text"]
+    check(sched.startswith("⏰ הודעות קבועות") and "הסיכום היומי: ראשון עד חמישי 20:00 (שינית)" in sched
+          and "הסיכום השבועי: מוצ״ש 21:00" in sched, "schedule answered from JOBS + overrides")
+    e["tg"].user_text("תזמונים")
+    step(e)
+    check(e["tg"].sent[-1]["text"].startswith("⏰ הודעות קבועות"), "\"תזמונים\" command")
+
+    bad = [({"job": "daily", "time": "23:30"}, "22:30"), ({"job": "weekly", "time": "19:00", "days": ["fri"]}, "מוצ״ש"),
+           ({"job": "weekly", "time": "12:00"}, "18:00"), ({"job": "morning", "time": "08:00", "days": ["sat"]}, "בשבת"),
+           ({"job": "daily", "time": "25:00"}, "השעה"), ({"job": "recap", "time": "18:00"}, "ריקאפ"), ({"job": "morning", "off": True}, "מכבה")]
+    for a, why in bad:
+        e["llm"].items.append({"actions": [dict(a, action="set_job_time")], "reply": "בסדר."})
+        r, _ = say(e, "שנה שעה")
+        check("⚠️ לא ביצעתי" in r and why in r and "עודכן" not in r, f"rejected {a} ({r[-70:]!r})")
+    check(st(e)["bot"]["job_times"] == {"daily": {"time": "20:00"}}, "rejected changes leave the state alone")
+    e["llm"].items.append({"actions": [{"action": "set_job_time", "job": "weekly", "time": "19:30"},
+                                       {"action": "set_job_time", "job": "reinforce", "time": "21:00", "days": ["חמישי"]},
+                                       {"action": "set_job_time", "job": "reinforce", "off": True}], "reply": "בסדר."})
+    r, _ = say(e, "סיכום שבועי ב-19:30, חיזוק רק בחמישי ב-21, בעצם תכבה אותו")
+    jt = st(e)["bot"]["job_times"]
+    check("במקום 21:00" in r and jt["weekly"] == {"time": "19:30"} and jt["reinforce"] == {"off": True}, f"several changes ({jt})")
+    e["llm"].items.append({"actions": [{"action": "set_job_time", "job": "all", "reset": True}], "reply": "בסדר."})
+    r, _ = say(e, "חזור לברירת מחדל")
+    check("חזרו לברירת המחדל" in r and "הסיכום היומי: ראשון עד חמישי 21:30" in r and not st(e)["bot"]["job_times"], "reset to default")
+    b = bot_of(e)
+    b.load_state()
+    b.st["bot"]["job_times"] = {"daily": {"time": "22:30"}}
+    b.now = t("2026-10-27T22:40")
+    check([x for x in b.due_jobs() if x[0] == "daily"], "a changed time fires inside its window")
+    b.now = t("2026-10-27T23:10")
+    b.st["bot"]["jobs"].pop("daily:2026-10-27", None)
+    check(not [x for x in b.due_jobs() if x[0] == "daily"], "…and never after 23:00")
+
+
 def main():
     failures()
     outcome_line()
@@ -464,6 +606,9 @@ def main():
     pending_view()
     adapter()
     parse_unit()
+    deletion_policy()
+    report_now()
+    job_times()
     print("\nFAILS:", FAILS)
     return 1 if FAILS else 0
 

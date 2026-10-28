@@ -117,6 +117,12 @@ def semester_part():
 
     print("\n== יומן \"שיעורים\" נקי (מ-25.10)")
     run_until(e, t("2026-10-25T07:20"))
+    run_until(e, t("2026-10-25T07:50"))
+    mb = last(tg, "☀️")
+    body = mb["text"] if mb else ""
+    check("❓ צריך החלטה:" in body and body.index("❓ צריך החלטה:") < body.index("📅 היום:") < body.index("🗓️ חזרה שבועית"),
+          "morning: decisions first, then today's schedule")
+    check("חזרה על 19.10 (1)" in body and "חזרה על 19.10 (2)" in body, "duplicate unplaced titles numbered")
     lc = "שיעורים@sa"
     evs = cal.cals.get(lc, {})
     check(len(evs) > 60 and cal.shares == [(lc, PERS, "reader")], f"calendar created, shared read-only ({len(evs)} lessons)")
@@ -133,6 +139,9 @@ def semester_part():
     print("\n== חיזוק אחרי ריקאפ בציון 2 (שני 26.10)")
     run_until(e, t("2026-10-26T15:40"))
     rc = last(tg, "🚆 ריקאפ")
+    check(rc and not any(d.startswith("rate|") for row in rc["buttons"] for _, d in row), "recap starts with attendance only")
+    press(e, rc, lambda tx, d: d == "att|math|2026-10-26|present")
+    check(any(d == "rate|math|2026-10-26|2" for row in tg.msg(rc["id"])["buttons"] for _, d in row), "after 'present' → rating row")
     press(e, rc, lambda tx, d: d == "rate|math|2026-10-26|2")
     xp = last(tg, "💡")
     check(xp and "מתמטיקה: הבנה 2/5" in xp["text"], "reinforcement proposed for math")
@@ -140,7 +149,7 @@ def semester_part():
     if xp:
         b = bot_of(e)
         b.load_state()
-        p = next(iter(b.st["bot"]["xp"].values()))
+        p = next(x for x in b.st["bot"]["xp"].values() if x["kind"] == "extra")
         slot_day = date.fromisoformat(p["slots"][0][0][:10])
         check(slot_day.weekday() not in (P.MON, P.WED, P.SAT) and date(2026, 10, 27) <= slot_day <= date(2026, 10, 30),
               f"slot within 4 days, not Mon/Wed/Sat ({slot_day})")
@@ -151,9 +160,11 @@ def semester_part():
     n = len([m for m in tg.sent if m["text"].startswith("💡")])
     press(e, rc, lambda tx, d: d == "rate|math|2026-10-26|2")
     check(len([m for m in tg.sent if m["text"].startswith("💡")]) == n, "same lesson rated again → no second proposal")
+    press(e, rc, lambda tx, d: d == "att|law|2026-10-26|present")
     press(e, rc, lambda tx, d: d == "rate|law|2026-10-26|1")
     xp2 = last(tg, "💡")
     press(e, xp2, lambda tx, d: d.startswith("xp|ok"))
+    press(e, rc, lambda tx, d: d == "att|stats|2026-10-26|present")
     press(e, rc, lambda tx, d: d == "rate|stats|2026-10-26|2")
     check("2 תוספות" in tg.sent[-1]["text"] or "לא מצאתי מקום" in tg.sent[-1]["text"], "third extra this week → not proposed, told why")
 
@@ -178,6 +189,14 @@ def semester_part():
 
     print("\n== קיבולת: \"רק סשן אחד\" ביום עמוס")
     run_until(e, t("2026-10-27T12:00"))
+    wk = [m for m in tg.sent if m["text"].startswith("💪 מה צריך חיזוק")]
+    check(len(wk) == 1 and wk[0]["at"].strftime("%Y-%m-%d %H:%M") >= "2026-10-26 21:45", "reinforcement report Monday evening")
+    if wk:
+        lines = [x for x in wk[0]["text"].split("\n") if x.startswith("• ")]
+        # מתמטיקה: הבנה 2/5 וגם סשנים מהשבוע הקודם שלא בוצעו → הכי חלש. אחריה משפט (1/5) ואז סטטיסטיקה (2/5)
+        check([x.split(":")[0] for x in lines[:3]] == ["• מתמטיקה", "• משפט", "• סטטיסטיקה"] and "לא בוצעו" in lines[0],
+              f"worst first: {lines[:3]}")
+        check(len(wk[0]["text"]) < 500, "report is short")
     s0 = st(e)
     by = Counter(x["start"][:10] for x in s0["sessions"] if x.get("status") == "planned" and x["start"][:10] > "2026-10-27")
     busy = max((d for d in by if by[d] >= 2), key=lambda d: by[d], default=None)
@@ -189,8 +208,9 @@ def semester_part():
         s1 = st(e)
         left = [x for x in s1["sessions"] if x.get("status") == "planned" and x["start"][:10] == busy]
         check(len(left) == 1, f"one session left on {busy}")
-        check("הזזתי" in tg.sent[-1]["text"], "told what moved")
-        txt = tg.sent[-1]["text"]
+        rep = [m for m in tg.sent if m["text"].startswith("✅ עודכן")]
+        txt = rep[-1]["text"] if rep else ""
+        check("מה השתנה" in txt, "told what changed (user decision: executed and reported, no approval asked)")
         check(txt.count("• ") == by[busy] - 1, f"each removed session accounted for ({txt.count('• ')})")
         moved_ex = [x for x in s1["sessions"] if x.get("kind") in ("extra", "assign") and x["start"][:10] != busy
                     and x.get("status") == "planned" and x.get("key", "").endswith(busy)]
@@ -249,6 +269,104 @@ def semester_part():
            for x in cal.cals[PERS].values() if "dateTime" in x["start"]], "calendar with extras")
 
 
+def absence_part():
+    print("\n== ריקאפ בשני שלבים: היעדרות → הצעת השלמה (שני 26.10)")
+    e = make_env("2026-10-24T21:00")
+    tg = e["tg"]
+    run_until(e, t("2026-10-26T15:40"))
+    rc = last(tg, "🚆 ריקאפ")
+    check(rc and "היית בשיעור" in rc["text"], "recap asks attendance first")
+    press(e, rc, lambda tx, d: d == "att|math|2026-10-26|absent")
+    s0 = st(e)
+    check(s0["bot"]["attend"].get("math|2026-10-26") == "absent", "absence recorded")
+    row = next((r for r in tg.msg(rc["id"])["buttons"] if r and r[0][0].startswith("מתמטיקה")), [])
+    check(not any(d.startswith("rate|") for _, d in row), "absent → no rating row for that course")
+    xp = last(tg, "💡")
+    check(xp and "השלמה" in xp["text"] and "מעבר ל-11" not in xp["text"], f"make-up proposed, not as an extra ({xp and xp['text'][:80]})")
+    p = next((v for v in s0["bot"].get("xp", {}).values() if v.get("ref") == "abs:2026-10-26"), None)
+    check(p and p["kind"] == "rescheduled", "proposal kind is rescheduled")
+    n = len([m for m in tg.sent if m["text"].startswith("💡")])
+    press(e, rc, lambda tx, d: d == "att|math|2026-10-26|absent")
+    check(len([m for m in tg.sent if m["text"].startswith("💡")]) == n, "same absence pressed twice → no second proposal")
+    press(e, rc, lambda tx, d: d == "att|math|2026-10-26|present")
+    live = [v for v in st(e)["bot"].get("xp", {}).values() if v.get("ref") == "abs:2026-10-26" and v.get("state") == "pending"]
+    check(not live, "'בעצם הייתי' cancels the pending make-up proposal")
+    old = tg.msg(xp["id"])
+    check("לא שובץ" in old["text"] and not old["buttons"], "old proposal message marked cancelled, buttons removed")
+    press(e, xp, lambda tx, d: d.startswith("xp|ok"))
+    check(not [x for x in st(e)["sessions"] if x["key"].startswith("rescheduled:math:abs:")],
+          "pressing approve on the cancelled proposal books nothing")
+    check("math|2026-10-26" not in st(e)["bot"].get("makeup", []), "cancelling releases the make-up mark")
+    check(tg.find_button(rc["id"], lambda tx, d: d == "att|math|2026-10-26|absent") is None,
+          "after 'present' the recap message has no absent button (so a second absence comes from free text)")
+    b = bot_of(e)
+    b.load_state()
+    b.set_attendance("math", "2026-10-26", "absent")        # "לא הייתי" שנכתב בטקסט חופשי
+    b.propose_makeup("math", "2026-10-26")
+    b.save_state()
+    check(len([m for m in tg.sent if m["text"].startswith("💡")]) == n + 1, "absent again after present → one fresh proposal")
+    xp = last(tg, "💡")
+    press(e, xp, lambda tx, d: d.startswith("xp|ok"))
+    mk = [x for x in st(e)["sessions"] if x.get("kind") == "rescheduled" and x["key"].startswith("rescheduled:math:abs:")]
+    check(len(mk) == 1 and mk[0].get("lesson_day") == "2026-10-26", "approved → make-up session (kind rescheduled)")
+    b = bot_of(e)
+    b.load_state()
+    check(b.extras_in_week(P.week_start(date(2026, 10, 26))) == 0, "weekly extras budget untouched")
+    run_until(e, t("2026-10-26T16:30"), answer_daily=False)
+    check(not [m for m in tg.sent if m["text"].startswith("🚆 תזכורת")], "attendance answered → no recap reminder")
+
+
+def weekly_part():
+    print("\n== סיכום שבועי בבלוקים, ומספור סשנים כפולים")
+    e = make_env("2026-10-24T21:00")
+    tg = e["tg"]
+    run_until(e, t("2026-10-26T15:40"))
+    rc = last(tg, "🚆 ריקאפ")
+    press(e, rc, lambda tx, d: d.startswith("attall"))
+    check(all(d.startswith(("rate|", "noop", "rateall")) for row in tg.msg(rc["id"])["buttons"] for _, d in row),
+          "'present for all' → only rating buttons left")
+    press(e, rc, lambda tx, d: d == "rate|math|2026-10-26|2")
+    e["llm"].script.append({"reply": "רשמתי", "actions": [{"action": "recap", "course": "law", "date": "2026-10-26", "rating": 3,
+                                                          "topics": "חוזים: הצעה וקיבול", "unclear": ""}]})
+    tg.user_text("במשפט למדנו הצעה וקיבול")
+    step(e)
+    run_until(e, t("2026-10-31T21:10"))
+    w = last(tg, "📊")
+    first = w["text"].split("\n")[0] if w else ""
+    check(first.startswith("📊 סיכום שבוע 25.10 עד 31.10: שבוע") and first.endswith(".") and "מתוך" in first, f"first line is a verdict ({first})")
+    txt = w["text"] if w else ""
+    pos = [txt.find(x) for x in ("📈 בוצעו", "📚 מה נלמד:", "📝 ריקאפים:", "🔍 צריך חיזוק:", "🗓 השבוע הבא:")]
+    check(all(p > 0 for p in pos) and pos == sorted(pos), f"blocks in order 📈 📚 📝 🔍 🗓 ({pos})")
+    check("• משפט: חוזים: הצעה וקיבול" in txt, "topics studied, by course")
+    check("חסר ריקאפ: סטטיסטיקה 26.10" in txt, "lessons without a recap listed")
+    check("• מתמטיקה: הבנה 2/5" in txt.split("🔍")[1], "reinforcement block")
+    mb = [m for m in tg.sent if m["text"].startswith("☀️") and "30.10" in m["text"]]
+    body = mb[0]["text"] if mb else ""
+    check("כלכלה · חזרה על 29.10 (1)" in body and "כלכלה · חזרה על 29.10 (2)" in body, "same-title sessions on one day numbered in the morning list")
+    nxt = txt.split("🗓 השבוע הבא:")[1] if "🗓 השבוע הבא:" in txt else ""
+    check("(1)" in nxt and "(2)" in nxt, "and in the next-week plan")
+    b = bot_of(e)
+    b.load_state()
+    check(b.number_dups(["שלישי 3.11: 09:00 📚 א | 10:05 📚 ב | 11:10 📚 א"]) == ["שלישי 3.11: 09:00 📚 א (1) | 10:05 📚 ב | 11:10 📚 א (2)"],
+          "number_dups unit")
+    keys = [x["key"] for x in st(e)["sessions"]]
+    check(not [k for k in keys if k.endswith(("(1)", "(2)"))], "keys unchanged")
+
+    print("\n== \"סיכום\" / \"תכנון\" בלי Claude")
+    llm = e["llm"]
+    for text, prefix in (("סיכום", "🌙 סיכום יום"), ("סכם לי את היום", "🌙 סיכום יום"), ("סיכום שבוע", "📊 סיכום שבוע"),
+                         ("תכנון", "📅 "), ("מה התכנון להיום?", "📅 "), ("מה התכנון לשבוע", "שבוע "), ("מה התוכנית למחר", "📅 ")):
+        n = len(llm.calls)
+        tg.user_text(text)
+        step(e)
+        check(tg.sent[-1]["text"].startswith(prefix) and len(llm.calls) == n, f"\"{text}\" → {prefix.strip()} without the LLM")
+    n = len(llm.calls)
+    tg.user_text("סיכום של מה שלמדנו במתמטיקה: גבולות")
+    step(e)
+    check(len(llm.calls) == n + 1, "a longer message with content still goes to Claude")
+    check("\"סיכום\"" in __import__("bot.core", fromlist=["HELP"]).HELP, "help mentions it")
+
+
 def marathon_part():
     print("\n== מרתון מבחנים")
     e = make_env("2026-12-26T20:30", P.new_state())
@@ -271,6 +389,9 @@ def marathon_part():
     tg.user_text("מילואים 3.1 עד 6.1")
     step(e)
     check("🎖️ רשמתי" in tg.sent[-1]["text"], "reserve days recorded")
+    gone = [x for x in st(e)["sessions"] if x.get("kind") == "marathon" and x.get("status") == "dropped"]
+    check(gone and "🗑 עודכן: הורדתי מהיומן" in tg.sent[-1]["text"] and tg.sent[-1]["text"].count("• ") == len(gone)
+          and not tg.sent[-1]["buttons"], f"user-decided drop: executed without asking, each removed session reported ({len(gone)})")
     run_until(e, t("2027-01-05T12:00"))
     llm.script.append({"reply": "", "actions": [{"action": "practice_exam", "course": "intro", "score": 92}]})
     tg.user_text("עשיתי מבחן תרגול במבוא, 92")
@@ -280,7 +401,7 @@ def marathon_part():
     check(fr is not None, "offers to free the intro sessions already in the calendar")
     if fr:
         press(e, fr, lambda tx, d: d == "mar|free|intro")
-        check(tg.sent[-1]["text"].startswith("🔄 פיניתי"), "freed and re-planned")
+        check(tg.sent[-1]["text"].startswith("🔄 פיניתי") and "עודכן" in tg.sent[-1]["text"], "freed and re-planned, removal reported")
     run_until(e, t("2027-01-12T21:40"))
     s = st(e)
     mar = [x for x in s["sessions"] if x.get("kind") == "marathon"]
@@ -326,6 +447,8 @@ def marathon_part():
 
 def main():
     semester_part()
+    absence_part()
+    weekly_part()
     marathon_part()
     print("\nFAILS:", FAILS)
     return 1 if FAILS else 0

@@ -109,8 +109,10 @@ def main():
     r = last(tg, "🚆 ריקאפ")
     show(r)
     check(r and "משפט" in r["text"] and "סטטיסטיקה" in r["text"], "recap at 15:35 lists Monday courses")
-    tg.press(r["id"], tg.find_button(r["id"], lambda tt, d: d.startswith("rate|math") and d.endswith("|2")))
-    tg.press(r["id"], tg.find_button(r["id"], lambda tt, d: d.startswith("rate|law") and d.endswith("|4")))
+    tg.press(r["id"], "att|math|2026-10-19|present")      # שלב 1: נוכחות. הדירוג מופיע רק אחרי "הייתי"
+    tg.press(r["id"], "att|law|2026-10-19|present")
+    tg.press(r["id"], "rate|math|2026-10-19|2")
+    tg.press(r["id"], "rate|law|2026-10-19|4")
     llm.script.append({"actions": [
         {"action": "recap", "course": "math", "date": "2026-10-19", "rating": None, "topics": "גבולות", "unclear": "כלל לופיטל"},
         {"action": "assignment", "course": "stats", "title": "תרגיל 1", "due": "2026-10-26", "est_min": 90}],
@@ -123,7 +125,7 @@ def main():
     check(rc.get("law", {}).get("rating") == 4, "law rating saved")
     check(any(a["title"] == "תרגיל 1" for a in st["assignments"]), "assignment saved from free text")
     check(not [x for x in tg.sent if x["text"].startswith("🚆 תזכורת")], "no recap reminder after answering")
-    rb = r["buttons"][0]
+    rb = tg.msg(r["id"])["buttons"][0]
     check(any(b[0] == "•2•" for b in rb), "recap buttons show chosen rating")
 
     run_until(t("2026-10-19T21:35"), env)

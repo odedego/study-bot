@@ -74,7 +74,6 @@ CONFIG = {
     "evening_class_weekdays": [THU],
     "free_weekdays": [SUN, TUE, FRI],
     "closed_weekdays": [SAT],
-    "saturday_backup_start": "12:00",
     "max_same_course_per_day": 2,
     "day_total_max": 7,                # תקרה כוללת ליום (חזרות + תוספות + מרתון)
     "weekly_review_weekday": SUN,
@@ -311,7 +310,7 @@ class Session:
     label: str = ""          # כותרת לסשנים שאינם חזרה על שיעור (חיזוק, מטלה, מרתון)
 
     def title(self) -> str:
-        if self.kind in LABEL_KINDS:
+        if self.kind in LABEL_KINDS or (self.kind != "weekly" and not self.lesson_day):
             return self.label or f"📚 {COURSES[self.course]['name']}"
         if self.kind == "weekly":
             names = " + ".join(COURSES[c]["name"] for c in self.courses)
@@ -707,7 +706,7 @@ def feed_check(uni: Uni, raw_count: int | None, st: dict, today: date, now: date
             res["cancelled"].append((k, v))
         elif v["st"] == "on" and (p["start"], p["end"], p["loc"]) != (v["start"], v["end"], v["loc"]):
             what = "שעה" if (p["start"], p["end"]) != (v["start"], v["end"]) else "מיקום"
-            res["changed"].append({"key": k, "text": f"{_lk_label(k, v)}: {what} השתנה ({p['start']}–{p['end']} {p['loc']} → {v['start']}–{v['end']} {v['loc']})"})
+            res["changed"].append({"key": k, "text": f"{_lk_label(k, v)}: {what} השתנה ({p['start']} עד {p['end']} {p['loc']} → {v['start']} עד {v['end']} {v['loc']})"})
     for k, p in prev.items():
         if k.split(":")[1] < today.isoformat() or k in cur or p["st"] != "on":
             continue
@@ -757,7 +756,7 @@ def exceptions(start: date, days: int, uni: Uni, personal: list[Ev], plan_sessio
         slot = (l.start.weekday(), fmt_t(l.start))
         if slot not in pattern.get(l.course, set()):
             out.append({"date": l.day.isoformat(), "type": "moved_or_extra",
-                        "text": f"{COURSES[l.course]['name']} ({l.kind}) במועד לא רגיל: {HEB_DAY[l.start.weekday()]} {fmt_d(l.day)} {fmt_t(l.start)}–{fmt_t(l.end)}, {l.location}"})
+                        "text": f"{COURSES[l.course]['name']} ({l.kind}) במועד לא רגיל: {HEB_DAY[l.start.weekday()]} {fmt_d(l.day)} {fmt_t(l.start)} עד {fmt_t(l.end)}, {l.location}"})
         if l.start.weekday() in CONFIG["free_weekdays"]:
             out.append({"date": l.day.isoformat(), "type": "class_on_free_day",
                         "text": f"שיעור ביום {HEB_DAY[l.start.weekday()]} {fmt_d(l.day)} (יום שבדרך כלל חופשי): {COURSES[l.course]['name']}"})
@@ -834,20 +833,16 @@ def reschedule(today: date, uni: Uni, personal: list[Ev], state: dict, now: date
                 continue
             if day_room(state, day, sum(1 for s in existing if s.start.date() == day)) <= 0:
                 continue
-            if wd == SAT:
-                # גיבוי בשבת רק לחומר של חמישי
-                if date.fromisoformat(m["lesson_day"]).weekday() != THU:
-                    continue
-                prof = {"start": at(day, hm(CONFIG["saturday_backup_start"])), "end": at(day, hm("15:00")), "cap": 1}
-            else:
-                prof = day_profile(day, uni)
-                if prof["type"] == "class_day":
-                    continue
-                on_day = sum(1 for s in existing if s.start.date() == day)
-                total_cap = CONFIG["reschedule_total_cap_free_day"] if prof["type"] == "free" else prof["cap"] + 1
-                if on_day >= total_cap:
-                    continue
-                prof = dict(prof, cap=prof["cap"] + CONFIG["reschedule_max_per_day"])
+            if wd in CONFIG["closed_weekdays"]:
+                continue      # שבת: הבוט לא משבץ לבד. רק עודד רשאי לתאם סשן בשבת.
+            prof = day_profile(day, uni)
+            if prof["type"] == "class_day":
+                continue
+            on_day = sum(1 for s in existing if s.start.date() == day)
+            total_cap = CONFIG["reschedule_total_cap_free_day"] if prof["type"] == "free" else prof["cap"] + 1
+            if on_day >= total_cap:
+                continue
+            prof = dict(prof, cap=prof["cap"] + CONFIG["reschedule_max_per_day"])
             if day == today:
                 prof = dict(prof, start=max(prof["start"], _round_up(now + timedelta(minutes=30))))
             slots = free_slots(day, prof, busy_blocks(day, uni, personal), existing)
@@ -857,7 +852,7 @@ def reschedule(today: date, uni: Uni, personal: list[Ev], state: dict, now: date
             base = base_key(m["key"])
             why = "דיווחת שלא בוצע" if m.get("status") == "missed" else "לא אושר כבוצע"
             s = Session(f"re:{base}@{day.isoformat()}", "rescheduled", m["course"], [m["course"]], st, en,
-                        date.fromisoformat(m["lesson_day"]),
+                        date.fromisoformat(m["lesson_day"]) if m.get("lesson_day") else None,
                         note=f"שובץ מחדש: הסשן ב-{fmt_d(datetime.fromisoformat(m['start']).date())} {why}. אם כבר עשית, סמן ואמחק.")
             existing.append(s)
             added_per_day[day] += 1
@@ -879,8 +874,8 @@ def apply_reschedule(st: dict, r: dict):
                               | {"status": "planned"})
     for x in r["not_placed"]:
         if x["key"] in idx:
-            idx[x["key"]]["status"] = "dropped"
-            idx[x["key"]]["note"] = "לא נמצא מקום תוך שבוע; עובר לחזרה השבועית."
+            idx[x["key"]]["status"] = "unplaced"      # לא נמחק ולא מוסר: הבוט מציע משבצת לאישור (עודד מחליט)
+            idx[x["key"]]["note"] = "לא נמצא מקום תוך שבוע; ממתין להחלטה."
 
 
 # ---------------------------------------------------------------- diff
@@ -1009,7 +1004,7 @@ def compact_state(st: dict, now: datetime):
             row["planned"] += 1 if s.get("kind") != "rescheduled" else 0
             if s.get("status") == "done":
                 row["done"] += 1
-            elif s.get("status") in ("missed", "dropped"):
+            elif s.get("status") in ("missed", "dropped", "unplaced"):
                 row["missed"] += 1
             if s.get("kind") == "marathon" and s.get("course"):
                 # התקדמות המרתון נשמרת גם אחרי שהסשן עצמו נמחק מהמצב
@@ -1110,7 +1105,7 @@ def review_data(d: date, uni: Uni, personal: list[Ev], st: dict) -> dict:
     }
 
 
-def week_report(ws: date, st: dict, now: datetime | None = None) -> dict:
+def week_report(ws: date, st: dict, now: datetime | None = None, uni: "Uni | None" = None) -> dict:
     """סיכום שבוע לסקירה השבועית: בוצע מול מתוכנן, נושאים חלשים, נושאים לרענון."""
     now = now or datetime.now(TZ)
     we = ws + timedelta(days=7)
@@ -1125,7 +1120,7 @@ def week_report(ws: date, st: dict, now: datetime | None = None) -> dict:
         stt = s.get("status")
         if stt == "done":
             per[c]["done"] += 1
-        elif stt in ("missed", "dropped", "rescheduled"):
+        elif stt in ("missed", "dropped", "rescheduled", "unplaced"):
             per[c]["missed"] += 1
         elif stt == "planned":
             per[c]["open"] += 1
@@ -1150,7 +1145,23 @@ def week_report(ws: date, st: dict, now: datetime | None = None) -> dict:
     rate = tot_d / tot_p if tot_p else None
     prev_rate = prev_d / prev_p if prev_p else None
     burnout = rate is not None and prev_rate is not None and rate < 0.7 and prev_rate < 0.7
-    return {"week_start": ws.isoformat(), "by_course": by_course, "total_planned": tot_p, "total_done": tot_d,
+    # ריקאפים: לכל שיעור שהתקיים השבוע (עד עכשיו) יש ריקאפ? היעדרות/מילואים = אין צורך בריקאפ
+    attend = st.get("bot", {}).get("attend", {})
+    rc_keys = {(r.get("course"), r.get("date")) for r in recaps}
+    held = sorted({(l.course, l.day.isoformat()) for l in (uni.lessons if uni else [])
+                   if ws <= l.day < we and l.end <= now}, key=lambda x: (x[1], COURSE_ORDER.index(x[0])))
+    need = [x for x in held if attend.get(f"{x[0]}|{x[1]}") in (None, "present")]
+    missing = [x for x in need if x not in rc_keys]
+    topics: dict[str, list[str]] = {}
+    for r in sorted(recaps, key=lambda r: r.get("date", "")):
+        if ws.isoformat() <= r.get("date", "") < we.isoformat() and (r.get("topics") or "").strip() and r.get("course") in COURSES:
+            topics.setdefault(r["course"], []).append(r["topics"].strip())
+    weak_now = weak_data(st, min(now.date(), we - timedelta(days=1)), 7)
+    verdict = _verdict(tot_d, tot_p, weak_now[0]["course"] if weak_now else None, len(missing))
+    return {"verdict": verdict, "lessons_held": held, "recaps_needed": len(need), "missing_recaps": missing,
+            "topics_by_course": {c: topics[c] for c in COURSE_ORDER if c in topics},
+            "weak_lines": weak_lines(st, min(now.date(), we - timedelta(days=1)), 7, 3),
+            "week_start": ws.isoformat(), "by_course": by_course, "total_planned": tot_p, "total_done": tot_d,
             "completion_rate": round(rate, 2) if rate is not None else None,
             "weak_topics": [{"course": name(r["course"]), "date": r["date"], "rating": r.get("rating"),
                              "topics": r.get("topics"), "unclear": r.get("unclear")} for r in weak],
@@ -1158,6 +1169,66 @@ def week_report(ws: date, st: dict, now: datetime | None = None) -> dict:
             "suggest_lighter_load": burnout,
             "open_assignments": [a for a in st.get("assignments", []) if a.get("status") != "done"],
             "weeks_since_start": (ws - date(2026, 10, 18)).days // 7}
+
+
+def _verdict(done: int, planned: int, weakest: str | None, missing_recaps: int) -> str:
+    """משפט אחד שמסכם את השבוע."""
+    if not planned:
+        return "עוד אין נתונים לשבוע הזה."
+    pct = round(100 * done / planned)
+    head = ("שבוע מצוין" if pct >= 90 else "שבוע טוב" if pct >= 70 else "שבוע חלקי" if pct >= 50 else "שבוע חלש")
+    tail = f"; הכי צריך חיזוק: {COURSES[weakest]['name']}" if weakest else ("; חסרים ריקאפים" if missing_recaps else "")
+    return f"{head}: {done} מתוך {planned} סשנים ({pct}%){tail}."
+
+
+def weak_data(st: dict, today: date, days: int = 14) -> list[dict]:
+    """מה צריך חיזוק: לכל קורס, ריקאפים בציון הבנה נמוך (עד 3) וסשנים שלא בוצעו, ב-days הימים האחרונים.
+    ממוין מהחלש ביותר. ציון: (4 - הבנה) לכל ריקאפ חלש, ועוד 1 לכל סשן שלא בוצע."""
+    lo, hi = (today - timedelta(days=days)).isoformat(), today.isoformat()
+    per: dict[str, dict] = {}
+
+    def row(c):
+        return per.setdefault(c, {"course": c, "score": 0, "ratings": [], "topics": [], "missed": 0})
+    for r in st.get("recaps", []):
+        c, rt = r.get("course"), r.get("rating")
+        if c in COURSES and rt and rt <= 3 and lo <= r.get("date", "") <= hi:
+            x = row(c)
+            x["score"] += 4 - rt
+            x["ratings"].append(rt)
+            t = (r.get("unclear") or r.get("topics") or "").strip()
+            if t:
+                x["topics"].append(t)
+    done = {s["key"] for s in st.get("sessions", []) if s.get("status") == "done"}
+    for s in st.get("sessions", []):
+        c = s.get("course")
+        # שלא בוצע: סומן ❌, לא נמצא לו מקום, או הוזז והשלמה שלו עוד לא בוצעה
+        miss = s.get("status") in ("missed", "unplaced") or (s.get("status") == "rescheduled" and s.get("moved_to") not in done)
+        if c in COURSES and miss and lo <= s.get("start", "")[:10] <= hi:
+            x = row(c)
+            x["score"] += 1
+            x["missed"] += 1
+    return sorted(per.values(), key=lambda x: (-x["score"], min(x["ratings"] or [6]), COURSE_ORDER.index(x["course"])))
+
+
+def weak_lines(st: dict, today: date, days: int = 14, limit: int = 5) -> list[str]:
+    out = []
+    for x in weak_data(st, today, days)[:limit]:
+        bits = []
+        if x["ratings"]:
+            bits.append(f"הבנה {min(x['ratings'])}/5")
+        if x["missed"]:
+            bits.append("סשן אחד לא בוצע" if x["missed"] == 1 else f"{x['missed']} סשנים לא בוצעו")
+        t = "; ".join(dict.fromkeys(x["topics"]))
+        out.append(f"• {COURSES[x['course']]['name']}: " + " · ".join(bits) + (f" ({t[:60]})" if t else ""))
+    return out
+
+
+def weak_report(st: dict, today: date, days: int = 14) -> str:
+    """הודעת "💪 מה צריך חיזוק": קצרה, מהחלש לחזק. ריק = אין מה לחזק."""
+    lines = weak_lines(st, today, days)
+    if not lines:
+        return ""
+    return "\n".join(["💪 מה צריך חיזוק (שבועיים אחרונים)"] + lines + ["", "רוצה סשן חיזוק? כתוב לי למשל \"תוסיף חיזוק במתמטיקה מחר\"."])
 
 
 # ---------------------------------------------------------------- calendar <-> state
@@ -1245,7 +1316,7 @@ def exc_notify(today: date, uni: Uni, personal: list[Ev], st: dict, write: bool)
 # ---------------------------------------------------------------- text output
 def plan_text(p: dict) -> str:
     ws = date.fromisoformat(p["week_start"])
-    out = [f"שבוע {fmt_d(ws)}–{fmt_d(ws + timedelta(days=6))}"]
+    out = [f"שבוע {fmt_d(ws)} עד {fmt_d(ws + timedelta(days=6))}"]
     by_day = defaultdict(list)
     for s in p["sessions"]:
         by_day[datetime.fromisoformat(s["start"]).date()].append(s)

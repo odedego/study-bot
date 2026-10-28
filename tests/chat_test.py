@@ -80,7 +80,7 @@ def main():
     tick()
     old = tg.msg(next(m["id"] for m in pps if "החתונה" in m["text"]))
     check("הוחלף בהצעה מעודכנת" in old["text"] and not old["buttons"], "old proposal marked replaced, buttons removed")
-    check("18:00–23:00" in tg.sent[-1]["text"], "new proposal with the corrected end")
+    check("18:00 עד 23:00" in tg.sent[-1]["text"], "new proposal with the corrected end")
     st = json.loads(store.blob)
     check(len(st["bot"]["chat"]) <= 16, "history capped")
 
