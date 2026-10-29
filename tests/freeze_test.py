@@ -45,7 +45,8 @@ def main():
     after = len(events(e))
     tg = e["tg"]
     texts = [m["text"] for m in tg.sent]
-    check(after <= before, f"no new events in the reviews calendar ({before} → {after})")
+    writes = [c for c in e["cal"].calls if c[0] in ("create", "patch", "revive", "dup", "delete") and c[1] == REV]
+    check(after <= before and not writes, f"no create/patch/delete on the reviews calendar ({before} → {after}, writes={len(writes)})")
     check(not any("לא מצאתי מקום" in x for x in texts), "no 'couldn't find a slot' decisions")
     check(not any("השבוע מלא" in x for x in texts), "no 'week is full' lines")
     check(not any("ישובץ מחדש" in x for x in texts), "daily summary does not promise rescheduling")
@@ -53,8 +54,71 @@ def main():
     check(any(x.startswith("🗓") or "סיכום שבוע" in x for x in texts) or any("אני לא משבץ לבד" in x for x in texts), "weekly summary ran")
     check(any("אני לא משבץ לבד" in x for x in texts), "weekly summary explains there is no auto plan")
     check(not any("שאלה לכל קורס: החומר מצטבר" in x for x in texts), "no per-course calibration questions")
-    check(not any(x.startswith("🔧") for x in texts), "no deploy health message when all is well")
     check(st(e)["bot"]["mode"] == "freeze", "mode stays freeze")
+
+    print("== עדכון קוד: בדיקת חיבורים בצ'אט רק בכשל")
+    e = freeze_env("2026-10-29T07:00")
+    b = bot_of(e)
+    b.load_state()
+    n = len(e["tg"].sent)
+    b.health_text = lambda head: head + "\n✅ טלגרם\n✅ Claude: תקין"
+    b.after_deploy("abc1234")
+    check(len(e["tg"].sent) == n, "healthy deploy sends nothing to the chat")
+    b.health_text = lambda head: head + "\n✅ טלגרם\n❌ Upstash: תקלה"
+    b.after_deploy("abc5678")
+    check(len(e["tg"].sent) == n + 1 and "❌" in e["tg"].sent[-1]["text"], "failed health check does reach the chat")
+
+    print("== קיבולת במצב freeze: לא מזיזים עודף לבד")
+    e = make_env("2026-10-29T07:00")
+    b = bot_of(e)
+    b.load_state()
+    b.st["bot"]["mode"] = "v1"
+    b.save_state()
+    run_until(e, t("2026-10-31T23:00"), step=15)      # v1 מייצר סשנים, ואז עוברים ל-freeze
+    b = bot_of(e)
+    b.load_state()
+    b.st["bot"]["mode"] = "freeze"
+    days = {}
+    for s_ in b.st["sessions"]:
+        if s_.get("status") == "planned" and s_["start"] > e["clock"]().isoformat():
+            days.setdefault(s_["start"][:10], []).append(s_)
+    day = next((d for d, v in sorted(days.items()) if len(v) >= 2), None)
+    if day:
+        n_calls = len(e["cal"].calls)
+        out = b.apply_capacity(day, 0, False, "בלי סשנים")
+        moved = [c for c in e["cal"].calls[n_calls:] if c[0] in ("create", "patch", "revive", "dup", "delete") and c[1] == REV]
+        check(not moved and "לא מזיז" in out, "capacity limit in freeze moves nothing and says so")
+    else:
+        check(False, "setup: a day with 2+ planned sessions exists in the seed")
+
+    print("== מצב קיים עם q1 ובלי mode (כמו ב-Upstash)")
+    seed = json.load(open(os.path.join(os.path.dirname(__file__), "..", "bot", "seed_state.json"), encoding="utf-8"))
+    seed["pending_questions"] = [{"id": "q1", "text": "ניהול בארגונים: מבחן או עבודה? (יתברר בשבוע הראשון)", "asked": "2026-10-15T02:24+03:00"},
+                                 {"id": "q2", "text": "שאלה אחרת", "asked": "2026-10-20T10:00+03:00"}]
+    seed.get("bot", {}).pop("mode", None)
+    e = make_env("2026-10-29T07:00", state=seed)
+    b = bot_of(e)
+    os.environ.pop("STUDY_BOT_MODE", None)
+    try:
+        b.load_state()
+    finally:
+        os.environ["STUDY_BOT_MODE"] = "v1"
+    ids = [q["id"] for q in b.st["pending_questions"]]
+    check("q1" not in ids and "q2" in ids and b.frozen, f"stale q1 removed, other questions kept, freeze default ({ids})")
+    b.st["bot"]["mode"] = "V1"
+    check(b.frozen, "unknown mode value is treated as freeze")
+
+    print("== נוכחות בטקסט חופשי: הודעה אחת")
+    e = freeze_env("2026-10-29T07:00")
+    b = bot_of(e)
+    b.load_state()
+    n = len(e["tg"].sent)
+    out = b.set_attendance("mgmt", "2026-10-28", "absent", quiet=True)
+    check(len(e["tg"].sent) == n and "נוכחות חובה בכל מפגש" in out, "quiet attendance returns the note inside the reply, sends nothing")
+    b.set_attendance("math", "2026-10-26", "absent")
+    n = len(e["tg"].sent)
+    b.set_attendance("math", "2026-10-26", "absent")
+    check(len(e["tg"].sent) == n, "pressing the same absence twice does not resend the count")
 
     print("== מצב קיים בלי שדה mode")
     e = make_env("2026-10-29T07:00")

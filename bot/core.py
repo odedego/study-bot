@@ -271,13 +271,13 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         # מצב עבודה: freeze = הבוט לא משבץ ולא מזיז לבד (ברירת מחדל לכל מצב קיים). v1 = המודל הישן. v2 = הצעות (בבנייה)
         b.setdefault("mode", os.environ.get("STUDY_BOT_MODE", "freeze"))   # הבדיקות הישנות רצות על v1
         # פריט פתוח מיושן: בניהול בארגונים אין מבחן (סילבוס), לכן השאלה מבוטלת
-        base["pending_questions"] = [q for q in base.get("pending_questions", []) if q.get("id") != "q1"]
+        base["pending_questions"] = [q for q in base.get("pending_questions", []) if not (q.get("id") == "q1" and "מבחן או עבודה" in q.get("text", ""))]
         self.st = base
         self.seed_deadlines()
 
     @property
     def frozen(self) -> bool:
-        return self.st["bot"].get("mode", "freeze") == "freeze"
+        return self.st["bot"].get("mode", "freeze") not in ("v1", "v2")   # כל ערך לא מוכר (למשל שגיאת הקלדה) הוא freeze, הבטוח
 
     def seed_deadlines(self):
         """מועדי הגשה מהסילבוס נכנסים לרשימת המטלות פעם אחת (גם אם סימנת אותן כגמורות, לא חוזרות)."""
@@ -983,7 +983,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             return
         self.st["bot"]["msgs"][f"daily:{today.isoformat()}"] = {"keys": keys}
         idx = {x["key"]: x for x in self.st["sessions"]}
-        lines = ["🗓 סמן מה בוצע בסוף השבוע (מה שלא יסומן עד הבוקר ישובץ מחדש):"] + self.sess_lines([idx[k] for k in keys])
+        lines = ["🗓 סמן מה בוצע בסוף השבוע:" if self.frozen else "🗓 סמן מה בוצע בסוף השבוע (מה שלא יסומן עד הבוקר ישובץ מחדש):"] + self.sess_lines([idx[k] for k in keys])
         mid = self.tg.send("\n".join(lines), self.daily_buttons(today))
         self.st["bot"]["msgs"][str(mid)] = {"type": "daily", "date": today.isoformat()}
 
@@ -1352,7 +1352,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 reply = "לא מצאתי את הסשן"
             else:
                 self.mark(s, "done" if act == "done" else "missed")
-                reply = "✅ נרשם כבוצע" if act == "done" else "❌ נרשם. ישובץ מחדש בבוקר"
+                reply = "✅ נרשם כבוצע" if act == "done" else ("❌ נרשם" if self.frozen else "❌ נרשם. ישובץ מחדש בבוקר")
                 self.refresh_daily(mid)
         elif kind == "alldone":
             d = parts[1]
@@ -1630,7 +1630,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                            "recent_notes": [f"{n.get('at', '')[:10]}: {clean_title(n.get('text'), 140)}" for n in self.st["bot"]["notes"][-5:]],
                            "weekly_targets": {c: P.target_of(c, self.st) for c in COURSES},
                            "course_kind": {c: self.st["course_kind"].get(c) for c in COURSES},
-                           "planning_rules": PLANNING_RULES,
+                           "planning_rules": FREEZE_RULES if self.frozen else PLANNING_RULES,
                            "last_lesson_end": self.last_lesson_ends(uni, today),
                            "marathon": self.marathon_ctx(),
                            "bot_schedule": {n: ("off" if v[4] else f"{days_text(v[0])} {v[1]}") for n, v in self.job_schedule().items()}},
@@ -1973,7 +1973,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             return ""
         if act == "attendance":
             d = a.get("date") or self.now.date().isoformat()
-            out = "🙋 " + self.set_attendance(a.get("course"), d, a.get("status"))
+            out = "🙋 " + self.set_attendance(a.get("course"), d, a.get("status"), quiet=True)
             note = self.propose_makeup(a.get("course"), d) if a.get("status") == "absent" else ""
             return out + (f"\n{note}" if note else "")
         if act == "personal":
@@ -2042,11 +2042,12 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             return f"{COURSES[c]['name']}: {n} היעדרויות, חובה להגיע לכל מפגש{extra}"
         return f"{COURSES[c]['name']}: נעדרת {n} מתוך {lim} מותרות{extra}"
 
-    def set_attendance(self, c: str, d: str, v: str) -> str:
+    def set_attendance(self, c: str, d: str, v: str, quiet: bool = False) -> str:
         if c not in COURSES or v not in ATT_LABEL:
             raise ValueError("קורס או סטטוס לא מוכרים")
         date.fromisoformat(d)
         key = f"{c}|{d}"
+        again = self.st["bot"]["attend"].get(key) == v      # לחיצה חוזרת על אותו ערך: לא שולחים שוב את הספירה
         self.st["bot"]["attend"][key] = v
         msg = f"נרשם: {COURSES[c]['name']} · {ATT_LABEL[v]}"
         if v != "absent":
@@ -2068,7 +2069,11 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             elif n == lim:
                 extra = f"\n⚠️ {name}: זו ההיעדרות האחרונה המותרת."
             count = f"נעדרת {n} מתוך {lim} מותרות" if lim else f"{n} היעדרויות"
-            self.tg.send(f"{name}: {count}.{extra}")      # הודעה אחת קבועה עם הספירה. התשובה לכפתור נשארת קצרה, בלי מספרים כפולים
+            note = f"{name}: {count}.{extra}"      # הודעה אחת עם הספירה. התשובה לכפתור נשארת קצרה, בלי מספרים כפולים
+            if quiet:
+                return msg + "\n" + note          # בפעולת טקסט חופשי הספירה נכנסת לתשובה עצמה, לא להודעה נוספת
+            if not again:
+                self.tg.send(note)
             return msg
         return msg
 
@@ -2359,6 +2364,10 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         self.log.append(f"personal {p['op']} approved {pid}")
         return "✅ בוצע"
 
+
+FREEZE_RULES = ("כרגע הבוט לא משבץ ולא מזיז סשני למידה לבד. עודד קובע בעצמו מתי ללמוד, והבוט מציע ומתעד רק לבקשתו ובאישורו. "
+                "סשנים שכבר ביומן נשארים כמו שהם. אל תבטיח שיבוץ מחדש, שיבוץ אוטומטי או הזזת עודף. "
+                "כללים שנשארים: בלי שבת, שישי עד 16:00, אף פעם אחרי 23:00. יום חמישי: פנוי ללמוד עד 13:45 (תחילת השיעורים).")
 
 PLANNING_RULES = ("אחרי כל שיעור הבוט משבץ חזרה (סשן של 50 דקות) בימים הקרובים, לפי יעד סשנים שבועי לכל קורס (weekly_targets). "
                   "kind=review: חזרה על השיעור של lesson_day. kind=weekly: חזרה שבועית מקיפה. kind=rescheduled: סשן שהוזז. "
