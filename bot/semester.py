@@ -22,6 +22,18 @@ EXAMS = {
 # מגבלת היעדרויות לא מוצדקות. 0 = חובה להגיע לכל מפגש. חסר = לא ידוע (אין סילבוס או לא כתוב).
 ATTEND_LIMIT = {"math": 3, "econ": 4, "intro": 4, "mgmt": 0, "excel": 0}   # excel: נוכחות חובה לפי התקנון. stats ו-law: לא ידוע (אין סילבוס)
 
+# מדיניות לימוד לכל קורס (v2). no_gaps: "אסור לפתוח פערים" (עודד, 28.10). pop_quiz: בחנים בלי הודעה בשיעור הבא.
+# default_min: אורך סשן ברירת מחדל בדקות, לפי מה שעודד אמר בצ'אט (מתמטיקה 40-50, סטטיסטיקה שעה, כלכלה 25 וכו').
+COURSE_POLICY = {
+    "math": {"default_min": 45, "no_gaps": False, "pop_quiz": False},
+    "intro": {"default_min": 45, "no_gaps": True, "pop_quiz": True},
+    "econ": {"default_min": 30, "no_gaps": False, "pop_quiz": True},
+    "stats": {"default_min": 60, "no_gaps": False, "pop_quiz": False},
+    "excel": {"default_min": 30, "no_gaps": False, "pop_quiz": False},
+    "law": {"default_min": 25, "no_gaps": False, "pop_quiz": False},
+    "mgmt": {"default_min": 25, "no_gaps": False, "pop_quiz": False},
+}
+
 # מועדי הגשה ידועים מהסילבוס. נכנסים אוטומטית לרשימת המטלות (פעם אחת, לפי id).
 DEADLINES = [
     {"id": "mgmt-case", "course": "mgmt", "title": "מטלה מסכמת: ניתוח מקרה (30%, בקמפוס)", "due": "2027-01-03"},

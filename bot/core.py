@@ -263,6 +263,9 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             self.log.append("state: seeded")
         base = P.new_state()
         base.update(st)
+        base.setdefault("offers", {})
+        base.setdefault("log", [])
+        base.setdefault("prefs", {}).setdefault("dur", {})
         base.setdefault("bot", {})
         b = base["bot"]
         for k, v in {"offset": 0, "jobs": {}, "ids": {}, "msgs": {}, "pending": None, "fails": {},

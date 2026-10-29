@@ -929,7 +929,8 @@ def diff(plan: dict, existing_events: list[dict], now: datetime | None = None) -
 def new_state() -> dict:
     return {"version": 1, "updated": None, "pins": [], "sessions": [], "recaps": [], "assignments": [], "tasks": [],
             "course_kind": {c: COURSES[c]["kind"] for c in COURSE_ORDER}, "pending_questions": [], "runs": [],
-            "notified": {}, "acked": [], "archive": {}, "archived_keys": []}
+            "notified": {}, "acked": [], "archive": {}, "archived_keys": [],
+            "offers": {}, "log": [], "prefs": {"dur": {}}}
 
 
 _MD_ESC = re.compile(r"\\([\\\[\]_*#`>~|{}()+\-.!<])")
@@ -989,7 +990,7 @@ def dump_state(st: dict) -> str:
 
 
 COMPACT_AFTER_DAYS = 14
-SESSION_FIELDS = ("key", "status", "kind", "course", "courses", "start", "end", "lesson_day", "eventId", "note", "moved_to", "label")
+SESSION_FIELDS = ("key", "status", "kind", "course", "courses", "start", "end", "lesson_day", "eventId", "note", "moved_to", "label", "min", "src")
 
 
 def compact_state(st: dict, now: datetime):
@@ -1024,6 +1025,11 @@ def compact_state(st: dict, now: datetime):
     old = (now.date() - timedelta(days=14)).isoformat()
     st["tasks"] = [t for t in st.get("tasks", []) if t.get("status") == "open" or (t.get("done_at") or "9999")[:10] >= old]
     st["runs"] = st.get("runs", [])[-30:]
+    # v2: הצעות שפגו נמחקות אחרי 14 יום, יומן הלימוד נשמר 120 יום
+    st["offers"] = {k: v for k, v in st.get("offers", {}).items()
+                    if v.get("state") == "pending" or (v.get("date") or "9999") >= old}
+    lo = (now.date() - timedelta(days=120)).isoformat()
+    st["log"] = [r for r in st.get("log", []) if r.get("date", "") >= lo][-600:]
 
 
 def save_state(st: dict, path: str):
