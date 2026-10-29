@@ -340,6 +340,8 @@ class ExtrasMixin:
         on_day = self._cap_sessions(d)
         if len(on_day) <= max_sessions:
             return f"👍 רשמתי: ב-{_dd(day)} {span}. כרגע יש שם {len(on_day)}, ולא אוסיף מעבר לזה."
+        if self.frozen:
+            return f"👍 רשמתי: ב-{_dd(day)} {span}. כבר יש שם {len(on_day)} סשנים שנקבעו קודם, ואני לא מזיז אותם לבד. כתוב לי מה לבטל או להזיז."
         why = self.plan_guard()
         if why:
             return f"👍 רשמתי: ב-{_dd(day)} {span}. כרגע אני לא מצליח לקרוא את המערכת, אז אזיז את העודף בהודעת הבוקר."

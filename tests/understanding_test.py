@@ -68,7 +68,7 @@ def failures():
     good = {"actions": [], "reply": "הבנתי: כל הסופ\"ש בחיפה. מה לרשום?"}
     e = env(bad_json, good)
     r, b = say(e, 'כל הסופ"ש הבא אני בחיפה')
-    check("הבנתי" in r and "קיבלתי" not in r, f"unparsable first answer is retried ({r[:40]!r})")
+    check(r.startswith("כל הסופ") and "הבנתי" not in r and "קיבלתי" not in r, f"unparsable first answer is retried, no echo prefix ({r[:40]!r})")
     check(len(e["llm"].calls) == 2 and "החזר שוב באותו מבנה" in e["llm"].calls[1] and "החזר שוב" not in e["llm"].calls[0], "retry carries a note")
     check(any("unparsable" in l for l in b.log), "failure reason logged")
     check(all(k["tool"] and k["max_tokens"] >= 2000 for k in e["llm"].kw), "structured tool + 2000+ tokens on every call")

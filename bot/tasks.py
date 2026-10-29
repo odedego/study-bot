@@ -336,7 +336,10 @@ class TasksMixin:
         out = []
         for t in self.open_tasks():
             d = self._due_of(t)
-            if (d and (d - today).days <= FAR_DAYS) or today.weekday() in FAR_WEEKDAYS:
+            n = (d - today).days if d else None
+            if n is not None and n < -1 and today.weekday() not in FAR_WEEKDAYS and t.get("source") != "syllabus":
+                continue          # באיחור של יומיים או יותר: לא באדום כל בוקר, רק בימי ראשון ורביעי (יחד עם "עדיין רלוונטית?")
+            if (d and n <= FAR_DAYS) or today.weekday() in FAR_WEEKDAYS:
                 out.append(t)
         return sorted(out, key=lambda t: self._rank(t, today))
 
