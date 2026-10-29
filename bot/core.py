@@ -268,8 +268,16 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         for k, v in {"offset": 0, "jobs": {}, "ids": {}, "msgs": {}, "pending": None, "fails": {},
                      "notes": [], "durations": {}, "warned": {}, "pp": {}, "pids": {}, "attend": {}, "seeded": []}.items():
             b.setdefault(k, v)
+        # מצב עבודה: freeze = הבוט לא משבץ ולא מזיז לבד (ברירת מחדל לכל מצב קיים). v1 = המודל הישן. v2 = הצעות (בבנייה)
+        b.setdefault("mode", os.environ.get("STUDY_BOT_MODE", "freeze"))   # הבדיקות הישנות רצות על v1
+        # פריט פתוח מיושן: בניהול בארגונים אין מבחן (סילבוס), לכן השאלה מבוטלת
+        base["pending_questions"] = [q for q in base.get("pending_questions", []) if q.get("id") != "q1"]
         self.st = base
         self.seed_deadlines()
+
+    @property
+    def frozen(self) -> bool:
+        return self.st["bot"].get("mode", "freeze") == "freeze"
 
     def seed_deadlines(self):
         """מועדי הגשה מהסילבוס נכנסים לרשימת המטלות פעם אחת (גם אם סימנת אותן כגמורות, לא חוזרות)."""
@@ -443,7 +451,9 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 self.log.append(f"mark patch failed: {e}")
 
     def sync_week(self, ws: date, uni, personal) -> dict:
-        """תוכנית השבוע ← יומן החזרות. יוצר רק מה שחסר. לא מוחק ולא מזיז."""
+        """תוכנית השבוע ← יומן החזרות. יוצר רק מה שחסר. לא מוחק ולא מזיז. במצב freeze לא יוצר כלום."""
+        if self.frozen:
+            return {"sessions": [], "capped": [], "unplaced": [], "created": [], "frozen": True}
         p = P._plan_for(ws, uni, personal, self.st)
         known = {x["key"] for x in self.st["sessions"]}
         count = sum(1 for x in self.st["sessions"] if x.get("kind") in ("review", "rescheduled") and x.get("status") in ("planned", "done", "missed")
@@ -734,6 +744,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         moved, not_placed, created, mar_made, cap_lines = [], [], [], [], []
         if fc["block"]:
             warn.append("⚠️ לא שיבצתי היום: " + "; ".join(fc["reasons"]))
+        elif self.frozen:
+            pass            # אין שיבוץ, שיבוץ מחדש או הזזת עודף אוטומטיים. הצעות רק לבקשתך או באישורך
         else:
             cap_lines = self.enforce_capacity()
             r = self.cap_reschedule(P.reschedule(today, uni, personal, self.st, self.now), today)
@@ -937,7 +949,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 keys.append(s["key"])
         lines = [f"🌙 סיכום יום · {dd(today)}"]
         if keys:
-            lines.append("סמן מה בוצע (מה שלא יסומן עד הבוקר ישובץ מחדש):")
+            lines.append("סמן מה בוצע:" if self.frozen else "סמן מה בוצע (מה שלא יסומן עד הבוקר ישובץ מחדש):")
         else:
             lines.append("לא היו סשנים היום.")
         prog = rd["week_progress"]
@@ -955,7 +967,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         openq = [q for q in rd["pending_questions"] if not str(q.get("id", "")).startswith(("dup", "cap-"))][-3:]
         if openq:
             lines += ["", "❔ פתוח:"] + [f"• {q['text']}" for q in openq[:3]]
-        lines += ["", "אפשר לכתוב לי קיבולת למחר (\"מחר פנוי כל היום\" / \"מחר רק סשן אחד\")."]
+        if not self.frozen:
+            lines += ["", "אפשר לכתוב לי קיבולת למחר (\"מחר פנוי כל היום\" / \"מחר רק סשן אחד\")."]
         self.st["bot"]["msgs"][f"daily:{today.isoformat()}"] = {"keys": keys}
         mid = self.tg.send("\n".join(lines), self.daily_buttons(today) or None)
         self.st["bot"]["msgs"][str(mid)] = {"type": "daily", "date": today.isoformat()}
@@ -1041,6 +1054,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                 buttons.append([("⏩ להקדים בשבוע", "mar|shift|-7"), ("⏸ לדחות בשבוע", "mar|shift|7")])
         if fc["block"]:
             lines.append("⚠️ לא שיבצתי את השבוע הבא: " + "; ".join(fc["reasons"]))
+        elif self.frozen:
+            lines.append("אני לא משבץ לבד זמני למידה. כתוב לי מתי נוח לך ללמוד, ואקבע ואעדכן.")
         else:
             p = self.sync_week(nxt, uni, personal)
             lines += self.number_dups(P.plan_text(p).split("\n")[1:])
@@ -1062,7 +1077,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             tl = []
         if tl:
             lines += [""] + tl
-        if rep["weeks_since_start"] == 2:
+        if rep["weeks_since_start"] == 2 and not self.frozen:
             cl, cb = self.calibration_lines(ws)
             lines += [""] + cl
             buttons += cb
@@ -1538,7 +1553,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             text = self.health_text(f"🔧 עדכון לבוט עלה ({sha}). בדיקת חיבורים:")
             self.log.append("health: " + " | ".join(l.split(":")[0] if l.startswith("✅") else l[:120]
                                                      for l in text.split("\n")[1:]))
-            self.tg.send(text)
+            if "❌" in text:           # רק כשל מגיע לצ'אט. הצלחה נשארת ביומן הריצה (הפקודה "בדיקה" מציגה הכול)
+                self.tg.send(text)
         except Exception as e:  # noqa: BLE001
             self.log.append(f"after_deploy: {e}")
 
@@ -1654,7 +1670,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             return None
         good = [x for x in acts if isinstance(x, dict) and isinstance(x.get("action"), str) and x["action"]]
         obj["actions"], obj["dropped"] = good, len(acts) - len(good)
-        obj["reply"] = str(obj.get("reply") or "").strip()
+        obj["reply"] = re.sub(r"^\s*הבנתי\s*[:,.\-–]\s*", "", str(obj.get("reply") or "").strip())
         return obj
 
     def ask_plan(self, system: str, prompt: str, media: dict | None = None) -> tuple[dict | None, str]:
@@ -2024,7 +2040,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             return f"{COURSES[c]['name']}: {n} היעדרויות · מגבלה: לא ידוע{extra}"
         if lim == 0:
             return f"{COURSES[c]['name']}: {n} היעדרויות, חובה להגיע לכל מפגש{extra}"
-        return f"{COURSES[c]['name']}: {n}/{lim}{extra}"
+        return f"{COURSES[c]['name']}: נעדרת {n} מתוך {lim} מותרות{extra}"
 
     def set_attendance(self, c: str, d: str, v: str) -> str:
         if c not in COURSES or v not in ATT_LABEL:
@@ -2039,13 +2055,21 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             return msg + ". לא נספר כהיעדרות."
         if v == "absent":
             lim, n = ATTEND_LIMIT.get(c), self.absences(c)
-            if lim is not None and n > lim:
-                self.tg.send(f"🚨 {COURSES[c]['name']}: עברת את מגבלת ההיעדרויות ({n} מתוך {lim} מותרות). לפי הסילבוס זה חוסם גישה למבחן. כדאי לפנות לצוות הקורס או למנהל הסטודנטים.")
-            elif lim is not None and n == lim:
-                self.tg.send(f"⚠️ {COURSES[c]['name']}: זו ההיעדרות האחרונה המותרת ({n}/{lim}). עוד אחת וחסום המבחן.")
-            elif lim is None:
-                self.tg.send(f"{COURSES[c]['name']}: נרשמה היעדרות ({n}). מגבלה: לא ידוע (אין סילבוס עדיין).")
-            return msg + f" ({n}" + (f"/{lim})" if lim is not None else ")")
+            name = COURSES[c]["name"]
+            has_exam = c in SEM.EXAMS
+            extra = ""
+            if lim is None:
+                extra = "\nמגבלה: לא ידוע (אין סילבוס עדיין)."
+            elif lim == 0:
+                extra = (f"\n{name}: נוכחות חובה בכל מפגש. כדאי לפנות לצוות הקורס." if not has_exam
+                         else f"\n{name}: נוכחות חובה בכל מפגש לפי התקנון. כדאי לפנות לצוות הקורס.")
+            elif n > lim:
+                extra = f"\n🚨 {name}: מעבר למגבלת ההיעדרויות. לפי הסילבוס זה עלול לחסום גישה למבחן. כדאי לפנות לצוות הקורס."
+            elif n == lim:
+                extra = f"\n⚠️ {name}: זו ההיעדרות האחרונה המותרת."
+            count = f"נעדרת {n} מתוך {lim} מותרות" if lim else f"{n} היעדרויות"
+            self.tg.send(f"{name}: {count}.{extra}")      # הודעה אחת קבועה עם הספירה. התשובה לכפתור נשארת קצרה, בלי מספרים כפולים
+            return msg
         return msg
 
     def attendance_text(self) -> str:
@@ -2440,7 +2464,7 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
   שאל באיזו שעה. אם הוא אומר גם שהוא לא פנוי ללמוד באותם ימים: capacity עם max_sessions=0 וטווח to.
   דוגמה: "כל הסופ"ש הבא אני בחיפה, ובחמישי אני נוסע אחרי הלימודים" = אירוע בחמישי מסיום השיעור האחרון (end בשעה סבירה, ערב),
   אירוע רב-יומי לשישי-שבת, ו-capacity 0 לימים שלא פנוי בהם.
-- תמיד כתוב ב-reply משפט שאומר מה הבנת. אם אין פעולות, ב-reply תשובה לשאלה או שאלה למה שחסר. לעולם לא reply ריק יחד עם actions ריק.
+- ב-reply אל תחזור על מה שעודד כתב. כתוב מה קרה או את התשובה, בלי "הבנתי:". שאלה: לכל היותר אחת בהודעה, ובסוף. אם אין פעולות, ב-reply תשובה לשאלה או שאלה למה שחסר. לעולם לא reply ריק יחד עם actions ריק.
 - הודעה של הבוט בשיחה שהיא רק "קיבלתי." היא תקלה ישנה, לא תשובה לחקות.
 - recent_notes = הודעות קודמות של עודד שנשמרו כהערה כי לא הצלחתי לפענח אותן. אם ההודעה הנוכחית משלימה או מתקנת אחת מהן, פעל לפיה.
 - שאלת "למה" על סשן או על התוכנית ("למה קבעת 3 חזרות במתמטיקה?"): הסבר ב-2-3 משפטים מתוך sessions (kind, lesson_day, note),

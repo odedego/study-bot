@@ -150,13 +150,7 @@
 "law": "cumulative",
 "mgmt": "cumulative"
 },
-"pending_questions": [
-{
-"id": "q1",
-"text": "ניהול בארגונים: מבחן או עבודה? (יתברר בשבוע הראשון)",
-"asked": "2026-10-15T02:24+03:00"
-}
-],
+"pending_questions": [],
 "runs": [],
 "notified": {
 "e41432": "2026-10-15",
