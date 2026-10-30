@@ -49,7 +49,8 @@ def main():
     check(mt["learned"] == [ds] and mt["rating"] == 5, "נושא נלמד עם הדירוג")
     press(e, rc["id"], f"att|law|{ds}|present")
     press(e, rc["id"], f"rate|law|{ds}|2")
-    q2 = [m for m in e["tg"].sent if "מה לא הבנת" in m["text"] and "משפט" in m["text"]][-1]
+    q0 = [m for m in e["tg"].sent if "מה עברתם" in m["text"] and "משפט" in m["text"]][-1]
+    press(e, q0["id"], f"rqa|{ds}|law|skip")
     e["llm"].script.append({"reply": "רשמתי", "actions": [{"action": "recap", "course": "law", "date": ds, "unclear": "הבדל בין הצעה לקיבול", "topic_ids": [0]}]})
     e["tg"].user_text("לא הבנתי הצעה וקיבול")
     tick(e)
@@ -60,9 +61,9 @@ def main():
     b = bot_of(e)
     b.load_state()
     b.st["bot"]["rq"]["cur"] = {"c": "intro", "k": "topics", "mid": 1, "text": "x: מה עברתם?", "sug": "", "at": b.now.isoformat()}
-    rq = json.loads(b.context_for_llm())["recap_question"]
-    check(rq and len(rq["topics"]) >= 4 and rq["topics"][0]["id"] == 0, "רשימת נושאים עם מספרים בהקשר")
     b.st["bot"]["rq"]["cur"] = None
+    mat = json.loads(b.context_for_llm())["material"]
+    check(len(mat["math"]) >= 4 and mat["math"][0][0] == 0, "רשימת נושאים עם מספרים בהקשר גם בלי שאלה פעילה")
     print("== חזרה ותיקון ==")
     b.studied_action({"course": "math", "date": "2026-11-03", "minutes": 30})
     mt = b.st["topics"]["math"][0]
@@ -93,6 +94,44 @@ def main():
     b.st["topics"]["math"][0].update(learned=["2026-11-02"])
     _, lines = b.week_summary(P.week_start(date(2026, 11, 7)), date(2026, 11, 7), uni)
     check(any("כיסוי חומר" in x for x in lines) and any("מתמטיקה" in x and "נלמדו" in x for x in lines), "סיכום שבועי כולל כיסוי חומר")
+    print("== תיקוני סקירה ==")
+    s2 = {}
+    check(TOP.match(s2, "math", "פונקציות") == [], "תיקו בין כמה נושאים: לא משייכים")
+    check(TOP.match(s2, "math", "אופטימיזציה") == [4], "מילה ייחודית משייכת נושא אחד")
+    check(TOP.match(s2, "math", "פונקציות בסיסיות") == [1], "שם זהה בדיוק מנצח")
+    check(TOP.match(s2, "math", "עברנו על הנגזרות") == [3], "אות יחס לא שוברת התאמה")
+    check(TOP.match(s2, "econ", "ההיצע") in ([3], []) and 4 not in TOP.match(s2, "econ", "ההיצע"), "ההיצע לא מושך את נושא השבוע הבא")
+    s3 = {}
+    TOP.mark_learned(s3, "math", "2026-11-05", [0], rating=2, unclear="חדש")
+    TOP.mark_learned(s3, "math", "2026-11-02", [0], rating=5, unclear="ישן")
+    t0 = TOP.ensure(s3, "math")[0]
+    check(t0["rating"] == 2 and t0["unclear"] == "חדש", "דירוג ישן לא דורס חדש")
+    TOP.mark_reviewed(s3, "math", "2026-11-05", [0], est=False)
+    check(not TOP.is_weak(t0), "חזרה אמיתית באותו יום סוגרת חולשה")
+    s3["recaps"] = [{"course": "math", "date": "2026-11-05", "tids": [0, 2]}, {"course": "math", "date": "2026-11-02", "tids": [0]}]
+    TOP.clear_topic(s3, "math", [0], "2026-11-05")
+    t0 = TOP.ensure(s3, "math")[0]
+    check(t0["learned"] == ["2026-11-02"] and t0["rating"] == 5 and t0["rated_at"] == "2026-11-02" or t0["rating"] in (None, 5), "ניקוי לפי תאריך משאיר את שאר ההיסטוריה")
+    check(s3["recaps"][0]["tids"] == [2] and s3["recaps"][1]["tids"] == [0], "ניקוי מסיר את המספר מהריקאפ של אותו יום בלבד")
+    TOP.clear_topic(s3, "math", [0])
+    check(not TOP.ensure(s3, "math")[0]["learned"], "ניקוי בלי תאריך מאפס")
+    s4 = {"topics": {"law": [TOP._new("נושא ישן שהוסר"), TOP._new("מבוא וכריתת חוזה: הצעה וקיבול,")]}}
+    TOP.ensure(s4, "law")
+    check(s4["topics"]["law"][0]["stale"] and TOP.stats(s4, "law", date(2026, 11, 3))["total"] == len(TOP.course_topics("law")), "נושא שהוסר מהסילבוס לא נספר")
+    print("== דירוג נמוך ממופה לנושא ==")
+    e2 = env()
+    rc2 = recap_msg(e2)
+    b2 = bot_of(e2)
+    b2.load_state()
+    b2.st["bot"]["rq"]["courses"].append("econ")
+    b2.add_recap(ds, "econ", rating=2)
+    b2.rq_on_rating(ds, "econ", 2)
+    sug = TOP.index_of(b2.st, "econ", b2.rq_suggestion("econ", ds))
+    et = b2.st["topics"]["econ"][sug] if sug is not None else {}
+    check(sug is not None and et["learned"] == [ds] and et["rating"] == 2, "כלכלה בדירוג נמוך: נושא השבוע משויך אוטומטית")
+    press(e2, rc2["id"], f"att|stats|{ds}|present")
+    press(e2, rc2["id"], f"rate|stats|{ds}|1")
+    check(any("מה עברתם" in m["text"] and "סטטיסטיקה" in m["text"] for m in e2["tg"].sent), "דירוג נמוך בלי נושא שבועי: קודם שואלים מה עברתם")
     print("\n" + ("הכול עבר" if not FAILS else f"{len(FAILS)} כשלים"))
     return 1 if FAILS else 0
 

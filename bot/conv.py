@@ -53,9 +53,11 @@ class ConvMixin:
         cur = r["cur"] if r and not r["closed"] else None
         if not cur or cur.get("at", "") < P.iso(self.now - timedelta(hours=10)):
             return None
-        tp = TOP.ensure(self.st, cur["c"])
-        return {"course": cur["c"], "date": r["date"], "kind": cur["k"], "asked": cur["text"].split("\n")[0],
-                "topics": [{"id": i, "name": t["name"][:50]} for i, t in enumerate(tp)]}
+        return {"course": cur["c"], "date": r["date"], "kind": cur["k"], "asked": cur["text"].split("\n")[0]}
+
+    def material_for_llm(self) -> dict:
+        """מספרי הנושאים לכל קורס, תמיד בהקשר: כך Claude משייך ומתקן גם מחוץ לשאלת ריקאפ."""
+        return {c: [[i, t["name"][:32]] for i, t in TOP.live(self.st, c)] for c in P.COURSE_ORDER if TOP.live(self.st, c)}
 
     def rq_close(self, ds: str | None = None):
         r = self.rq(ds)
@@ -73,7 +75,16 @@ class ConvMixin:
             return self.deferred(lambda: self.rq_check_final(ds))
         if c not in r["courses"]:
             return
-        kinds = ["topics"] if rating >= 4 else ["unclear", "cause"]
+        sug_i = TOP.index_of(self.st, c, self.rq_suggestion(c, ds))
+        if rating >= 4:
+            kinds = ["topics"]
+        elif sug_i is not None:
+            self.add_recap(ds, c, topic_ids=[sug_i])          # נושא השבוע לפי הסילבוס: משויך בלי לשאול
+            kinds = ["unclear", "cause"]
+        elif TOP.next_unlearned(self.st, c, 1):
+            kinds = ["topics", "unclear", "cause"]            # קודם מה עברתם, כדי שהחולשה תיצמד לנושא
+        else:
+            kinds = ["unclear", "cause"]
         for k in kinds:
             tag = f"{c}|{k}"
             if tag in r["asked"]:
@@ -164,13 +175,14 @@ class ConvMixin:
                 self.add_recap(ds, c, unclear=f"הנושא: {tp[i]['name'][:60]}", topic_ids=[i])
             shown = f"✔️ {tp[i]['name'].split(':')[0][:40]}"
         elif k == "topics" and code == "ok":
-            self.add_recap(ds, c, topics=cur.get("sug", ""))
+            self.add_recap(ds, c, topics=cur.get("sug", ""), topic_ids=[x for x in [TOP.index_of(self.st, c, cur.get("sug", ""))] if x is not None])
             shown = f"✔️ {cur.get('sug', '')}"
         elif k == "unclear" and code in UNCLEAR_OPTS:
             self.add_recap(ds, c, unclear=UNCLEAR_OPTS[code])
             shown = f"✔️ {UNCLEAR_OPTS[code]}"
         elif k == "unclear" and code == "u0":
-            self.add_recap(ds, c, unclear=f"הנושא: {cur.get('sug', '')}")
+            self.add_recap(ds, c, unclear=f"הנושא: {cur.get('sug', '')}",
+                           topic_ids=[x for x in [TOP.index_of(self.st, c, cur.get("sug", ""))] if x is not None])
             shown = f"✔️ {cur.get('sug', '')}"
         elif k == "cause" and code in CAUSE_OPTS:
             self.add_recap(ds, c, cause=CAUSE_OPTS[code])
@@ -348,8 +360,8 @@ class ConvMixin:
         ids = TOP.valid_ids(self.st, c, a.get("topic_ids")) or (TOP.match(self.st, c, a.get("topic") or "") if a.get("topic") else [])
         if ids:
             TOP.mark_reviewed(self.st, c, d, ids, est=False)
-        else:
-            inf = TOP.infer_review(self.st, c, d)
+        elif not any(r is not row and r.get("session") and r.get("course") == c and r.get("date") == d for r in self.st["log"]):
+            inf = TOP.infer_review(self.st, c, d)          # אם כבר יש סשן באותו יום, לא סופרים אותו לימוד כפול
             if inf:
                 row["tinf"] = inf
         tail = f" · נחזר: {TOP.label(self.st, c, ids)}" if ids else ""
@@ -461,7 +473,7 @@ class ConvMixin:
         d = a.get("date") or self.now.date().isoformat()
         op = a.get("op")
         if op == "clear":
-            TOP.clear_topic(self.st, c, ids)
+            TOP.clear_topic(self.st, c, ids, a.get("date") or None)
         elif op == "reviewed":
             TOP.mark_reviewed(self.st, c, d, ids, est=False)
         elif op == "learned":

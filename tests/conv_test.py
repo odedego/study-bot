@@ -71,8 +71,11 @@ def main():
     press(e, rc["id"], f"rate|law|{ds}|2")
     check(not any("מה לא הבנת" in m["text"] for m in tg.sent[n1:]), "שאלה שנייה ממתינה עד שהראשונה נענתה")
     press(e, q[0]["id"], f"rqa|{ds}|math|skip")
+    tq = [m for m in tg.sent[n1:] if "מה עברתם" in m["text"] and "משפט" in m["text"]]
+    check(len(tq) == 1, "אחרי דילוג: בדירוג נמוך בקורס בלי נושא שבועי קודם שואלים מה עברתם")
+    press(e, tq[0]["id"], btn(e, tq[0], lambda tx, d: d.endswith("|t0")))
     lq = [m for m in tg.sent[n1:] if "מה לא הבנת" in m["text"]]
-    check(len(lq) == 1 and "משפט" in lq[0]["text"], "אחרי דילוג: שאלת ההבהרה לדירוג נמוך")
+    check(len(lq) == 1 and "משפט" in lq[0]["text"], "ואז שאלת ההבהרה לדירוג נמוך")
     check(not any(r.get("topics") for r in st(e)["recaps"] if r["course"] == "math"), "דילוג לא שומר כלום")
     print("== דירוג נמוך: שתי שאלות, בלי הצעת חיזוק אוטומטית ==")
     n2 = len(tg.sent)

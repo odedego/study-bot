@@ -1679,6 +1679,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
                            "courses": {k: v["name"] for k, v in COURSES.items()},
                            "sessions": sess, "lessons": lessons, "recap_context": pend,
                            "recap_question": self.rq_for_llm(),
+                           "material": self.material_for_llm(),
                            "personal_events": self.personal_for_llm(),
                            "pending_proposals": self.pending_for_llm(),
                            "exams_moed_a": [{"course": c, "at": P.iso(dt), "days_left": n} for c, dt, n in SEM.upcoming_exams(today)],
@@ -2494,11 +2495,11 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 פעולות מותרות (השתמש רק ב-id מתוך sessions בהקשר, לעולם אל תמציא):
 {"action":"done","id":"..."}            סשן בוצע
 {"action":"missed","id":"..."}          סשן לא בוצע
-{"action":"recap","course":"math|intro|econ|stats|excel|law|mgmt","date":"YYYY-MM-DD","rating":1-5 או null,"topics":"מה נלמד","unclear":"מה לא ברור","cause":"מה הפריע (קצב, הסבר, רקע, ריכוז)","topic_ids":[מספרי נושאים מ-recap_question.topics, אם ברור על איזה נושא מדובר]}
+{"action":"recap","course":"math|intro|econ|stats|excel|law|mgmt","date":"YYYY-MM-DD","rating":1-5 או null,"topics":"מה נלמד","unclear":"מה לא ברור","cause":"מה הפריע (קצב, הסבר, רקע, ריכוז)","topic_ids":[מספרי נושאים מ-material, אם ברור על איזה נושא מדובר]}
 {"action":"study_at","course":"...","start":"YYYY-MM-DDTHH:MM","minutes":מספר או null}   עודד קבע מתי ללמוד: הבוט קובע ביומן. אורך לא נאמר = null
-{"action":"topic_set","course":"...","ids":[מספרי נושאים],"op":"learned|reviewed|clear","date":"YYYY-MM-DD"}   תיקון מפת החומר: "לא למדנו את X" = clear, "חזרתי על X" = reviewed
+{"action":"topic_set","course":"...","ids":[מספרי נושאים],"op":"learned|reviewed|clear","date":"YYYY-MM-DD רק אם נאמר תאריך מפורש"}   תיקון מפת החומר: "לא למדנו את X" = clear, "חזרתי על X" = reviewed
 {"action":"recap_skip","course":"...","date":"YYYY-MM-DD"}   דילוג על שאלות הריקאפ של קורס
-{"action":"studied","course":"...","date":"YYYY-MM-DD","minutes":מספר או null,"topic":"מה למד"}   עודד אמר שלמד (גם בלי סשן ביומן)
+{"action":"studied","course":"...","date":"YYYY-MM-DD","minutes":מספר או null,"topic":"מה למד","topic_ids":[מספרים מ-material]}   עודד אמר שלמד (גם בלי סשן ביומן)
 {"action":"assignment","course":"...","title":"...","due":"YYYY-MM-DD או null","est_min":מספר או null}
 {"action":"assignment_done","id":"..."}
 {"action":"move","id":"...","start":"YYYY-MM-DDTHH:MM","late_ok":false}   late_ok=true רק אם עודד ביקש במפורש ללמוד אחרי 23:00
@@ -2555,7 +2556,7 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
   ארוחה = שעתיים; פגישה, תור או סידור = שעה. ב-reply כתוב ששעת הסיום משוערת. בלי שעת התחלה בכלל (רק "בערב") = שאל באיזו שעה.
 - אם recap_question פעיל ועודד עונה עליו בטקסט: recap לאותו קורס ותאריך. kind=topics: מלא topics. kind=unclear: מלא unclear.
   kind=cause: מלא cause. אל תמלא שדה שלא נשאל עליו. אם הוא מבקש לדלג: {"action":"recap_skip","course":"...","date":"..."}.
-- מפת חומר: ב-recap_question.topics יש נושאי הקורס עם מספר. כשעודד אומר מה נלמד, מלא topic_ids עם המספרים התואמים (רק אם ברור). אל תמציא נושאים.
+- מפת חומר: ב-material יש נושאי כל קורס עם מספר [id, שם]. כשעודד אומר מה נלמד או חזר (ב-recap, studied, topic_set), מלא topic_ids עם המספרים התואמים (רק אם ברור). אל תמציא נושאים.
 - "אני לומד ב-17:00 חצי שעה מתמטיקה" = study_at (לא extra). "למדתי היום שעה סטטיסטיקה" = studied.
 - אם recap_context פעיל ועודד מתאר שיעורים, צור recap לכל קורס שהזכיר, בתאריך של recap_context.
 - תאריכים יחסיים ("מחר", "ביום רביעי") מחשבים מ-now. "הסופ"ש" = שישי ושבת. "הסופ"ש הבא" = שישי ושבת של השבוע הבא.
