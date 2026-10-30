@@ -159,7 +159,7 @@ LLM_TOOL = {"type": "object",
             "required": ["actions", "reply"]}
 COMMANDS = {"/start", "/help", "עזרה", "/today", "היום", "/tomorrow", "מחר", "/exams", "מבחנים", "/check", "בדיקה",
             "/marathon", "מרתון", "/absences", "היעדרויות", "נוכחות", "/week", "שבוע", "/tasks", "משימות", "/why", "למה", "מה עשית", "מה הבנת",
-            "/schedule", "תזמונים", "זמני הודעות"}
+            "/schedule", "תזמונים", "זמני הודעות", "/migrate", "מעבר"}
 
 
 def command_of(text: str) -> str | None:
@@ -282,7 +282,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
 
     @property
     def frozen(self) -> bool:
-        return self.st["bot"].get("mode", "freeze") not in ("v1", "v2")   # כל ערך לא מוכר (למשל שגיאת הקלדה) הוא freeze, הבטוח
+        return self.st["bot"].get("mode", "freeze") != "v1"   # v2 ו-freeze זהים בשיבוץ: הבוט לא משבץ לבד. כל ערך לא מוכר הוא freeze, הבטוח
 
     def seed_deadlines(self):
         """מועדי הגשה מהסילבוס נכנסים לרשימת המטלות פעם אחת (גם אם סימנת אותן כגמורות, לא חוזרות)."""
@@ -1454,6 +1454,8 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
                 ms = date.fromisoformat(self.mar()["start"]) + timedelta(days=int(v))
                 reply = self.mar_set_start(ms.isoformat())
             self.tg.send(reply)
+        elif kind == "mig":
+            reply = self.on_mig_callback(parts, mid)
         elif kind == "xp":
             _, act, xid = parts
             reply = self.exec_extra(xid) if act == "ok" else self.cancel_extra(xid)
@@ -1549,6 +1551,9 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
             return
         if cmd in ("/check", "בדיקה"):
             self.tg.send(self.health_text("🔧 בדיקת חיבורים"))
+            return
+        if cmd in ("/migrate", "מעבר"):
+            self.propose_migration()
             return
         if cmd in ("/marathon", "מרתון"):
             self.tg.send(self.marathon_text())
@@ -2448,7 +2453,7 @@ HELP = """אני בוט הלימודים שלך 📚
 • 20 דק׳ אחרי השיעור האחרון: ריקאפ. קודם נוכחות, ואחרי "הייתי" ציון הבנה. "לא הייתי" = הצעה לסשן השלמה.
 • 21:30: מה בוצע היום, ומה מחר. שני וחמישי 21:45: 💪 מה צריך חיזוק. מוצ״ש 21:00: סיכום שבוע ותוכנית לשבוע הבא.
 
-פקודות: היום · מחר · שבוע · מבחנים · מרתון · משימות · היעדרויות · בדיקה · למה
+פקודות: היום · מחר · שבוע · מבחנים · מרתון · משימות · היעדרויות · בדיקה · למה · מעבר
 "סיכום" (או "סכם לי את היום") = סיכום יום · "סיכום שבוע" = איך עובר השבוע
 "תכנון" (או "מה התכנון להיום") = הלו"ז של היום · "מה התכנון לשבוע" = תוכנית השבוע
 
