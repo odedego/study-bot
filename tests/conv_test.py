@@ -90,6 +90,7 @@ def main():
     check(fin and fin[0]["text"].count("?") == 1, "שאלה אחת בהודעה")
     check(not st(e)["sessions"] or all(s.get("src") != "button" for s in st(e)["sessions"]), "לא נקבע דבר בלי בחירה")
     print("== בחירה בחלון: נקבע ביומן ==")
+    check(btn(e, fin[0], lambda tx, d: "דלג" in tx and d.endswith("|no")) is not None, "בשאלת הזמן יש כפתור דלג")
     sa = btn(e, fin[0], lambda tx, d: d.startswith("sa|") and not d.endswith("|no"))
     check(sa is not None, "יש כפתור חלון פנוי")
     if sa:
@@ -171,6 +172,15 @@ def main():
     n = len(e5["tg"].sent)
     press(e5, rc5["id"], f"rate|math|{ds}|5")
     check(not any(m["text"].startswith(("מתמטיקה: מה", "מתי יהיה")) for m in e5["tg"].sent[n:]), "v1: אין שיחה")
+    print("== יום מילואים והיעדרות: השאלה נשלחת ==")
+    e7 = env()
+    rc7 = recap_msg(e7)
+    for c, v in (("law", "reserve"), ("math", "absent"), ("stats", "reserve")):
+        press(e7, rc7["id"], f"att|{c}|{ds}|{v}")
+    fin7 = [m for m in e7["tg"].sent if m["text"].startswith("מתי יהיה לך נוח")]
+    check(len(fin7) == 1 and btn(e7, fin7[0], lambda tx, d: "דלג" in tx) is not None, "גם ביום מילואים והיעדרות: שאלה עם דלג")
+    press(e7, fin7[0]["id"], btn(e7, fin7[0], lambda tx, d: "דלג" in tx))
+    check(st(e7)["bot"]["rq"]["closed"] and all(s.get("src") != "button" for s in st(e7)["sessions"]), "דלג סוגר בלי לקבוע")
     print("== תיקונים מסקירת Opus ==")
     e6 = env()
     tg6, ds = e6["tg"], "2026-11-02"

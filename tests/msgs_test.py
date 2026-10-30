@@ -40,10 +40,11 @@ def main():
     check(len(d) == 1, "סיכום יום נשלח")
     txt = d[0]["text"] if d else ""
     check("מחר אפשר ללמוד עד 13:45" in txt and "מתי נוח לך ללמוד?" in txt, "הצעת ערב לחמישי עד 13:45")
-    sa = [dd for r in (d[0]["buttons"] or []) for _, dd in r if dd.startswith("sa|")] if d else []
+    sa = [dd for r in (d[0]["buttons"] or []) for _, dd in r if dd.startswith("sa|") and not dd.endswith("|no")] if d else []
     check(len(sa) >= 1 and all(x.startswith("sa|2026-11-05|") for x in sa), "כפתורי חלון למחר")
     check("ישובץ מחדש" not in txt and "/11" not in txt, "אין שפה של שיבוץ אוטומטי או יעד 11")
     check(txt.count("?") == 1, "שאלה אחת בהודעה")
+    check(d and any("דלג" in tx for r in d[0]["buttons"] for tx, _ in r), "בהצעת הערב יש כפתור דלג")
     if sa:
         tm = [int(x.split("|")[2]) for x in sa]
         check(all(a < 1335 for a in tm), "חלונות חמישי מתחילים לפני השיעורים")

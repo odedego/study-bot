@@ -234,7 +234,7 @@ class ConvMixin:
                 rows.append([(f"{P.fmt_t(a)} · {m} דק׳ · {name}", f"sa|{ds}|{a:%H%M}|{course}|{m}")])
         elif not wins:
             lines.append("לא רואה חלון פנוי להיום. אפשר לכתוב לי שעה אם בכל זאת.")
-        rows.append([(NO_TIME_LABEL, f"sa|{ds}|no")])
+        rows.append([(NO_TIME_LABEL, f"sa|{ds}|no"), ("⏭️ דלג", f"sa|{ds}|no")])
         self.tg.send("\n".join(lines), rows)
 
     # ------------------------------------------------------------ קביעת סשן לפי בחירתו
@@ -379,6 +379,7 @@ class ConvMixin:
                 a, b = datetime.fromisoformat(a), datetime.fromisoformat(b)
                 m = min(SUG.minutes_for(c, self.st), int((b - a).total_seconds() // 60))
                 rows.append([(f"{P.fmt_t(a)} · {m} דק׳ · {COURSES[c]['name']}", f"sa|{tm.isoformat()}|{a:%H%M}|{c}|{m}")])
+        rows.append([("⏭️ דלג", f"sa|{tm.isoformat()}|no")])
         return lines, rows
 
     def morning_reco_line(self, today: date, uni) -> str:
