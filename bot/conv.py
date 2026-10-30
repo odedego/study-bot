@@ -407,3 +407,57 @@ class ConvMixin:
             out += ["", "פערים פתוחים (שיעור בלי לימוד אחריו): " + ", ".join(names)]
         out += ["", "מתי נוח לך לחזק? כתוב לי יום ושעה ואקבע."]
         return "\n".join(out)
+
+    # ------------------------------------------------------------ מעבר ל-v2 (שלב G)
+    MIG_KINDS = ("review", "weekly", "rescheduled", "marathon")
+
+    def migration_candidates(self) -> list[dict]:
+        """סשנים עתידיים שהבוט קבע לבד. לא נוגעים במה שעודד קבע (src), בתוספות שהוא אישר (extra, assign) ובסשן שכבר סומן."""
+        return [s for s in sorted(self.st["sessions"], key=lambda x: x["start"])
+                if s.get("status") == "planned" and datetime.fromisoformat(s["start"]) > self.now
+                and s.get("kind") in self.MIG_KINDS and s.get("src") not in ("button", "text")]
+
+    def propose_migration(self):
+        mode = self.st["bot"].get("mode", "freeze")
+        if mode == "v2":
+            self.tg.send("כבר במצב v2. הבוט רק שואל ומציע, ואתה קובע.")
+            return
+        if mode == "v1":
+            self.tg.send("הבוט במצב הישן (v1) שמשבץ לבד. המעבר נעשה דרך הגדרת מצב ולא כאן.")
+            return
+        cand = self.migration_candidates()
+        mine = len([s for s in self.st["sessions"] if s.get("status") == "planned" and s not in cand
+                    and datetime.fromisoformat(s["start"]) > self.now])
+        by_day: dict[str, int] = {}
+        for s in cand:
+            by_day[s["start"][:10]] = by_day.get(s["start"][:10], 0) + 1
+        days = ", ".join(f"{date.fromisoformat(d).day}.{date.fromisoformat(d).month} ({n})" for d, n in list(by_day.items())[:10])
+        lines = ["מעבר למצב החדש: הבוט לא קובע זמני למידה לבד, רק שואל ומציע, ואתה בוחר.",
+                 f"למחוק מיומן החזרות {len(cand)} סשנים עתידיים שהבוט קבע לבד?"]
+        if days:
+            lines.append("ימים: " + days + ("…" if len(by_day) > 10 else ""))
+        lines.append(f"לא ייגעו: {mine} סשנים שקבעת או אישרת (חיזוק, תוספת, מטלה), ושיעורים.")
+        self.tg.send("\n".join(lines), [[("✅ כן, למחוק ולעבור", "mig|ok"), ("✖️ לא עכשיו", "mig|no")]])
+
+    def on_mig_callback(self, parts: list[str], mid) -> str:
+        if parts[1] == "no":
+            self.tg.edit_buttons(mid, [])
+            return "בסדר, נשארים כמו שזה"
+        if self.st["bot"].get("mode", "freeze") == "v2":
+            self.tg.edit_buttons(mid, [])
+            return "כבר טופל"
+        done, failed = [], []
+        for s in self.migration_candidates():
+            n0 = len(self.log)
+            self._drop(s, "הוסר במעבר למצב החדש.")
+            if len(self.log) > n0 and str(self.log[-1]).startswith("drop:"):
+                failed.append(s)
+            else:
+                done.append(s)
+        self.st["bot"]["mode"] = "v2"
+        self.tg.edit_buttons(mid, [])
+        msg = f"✅ עברנו. נמחקו {len(done)} סשנים מיומן החזרות."
+        if failed:
+            msg += f" {len(failed)} לא נמחקו מהיומן (שגיאה), בדוק ידנית."
+        self.tg.send(msg + "\nמעכשיו אני שואל ומציע, ואתה קובע. סימנתי אותם \"הוסר\" ולא ייספרו כהחמצה.")
+        return "בוצע"
