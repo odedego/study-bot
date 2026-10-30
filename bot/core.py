@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import planner as P  # noqa: E402
 from bot import semester as SEM  # noqa: E402
 from bot import suggest as SUG  # noqa: E402
+from bot import topics as TOP  # noqa: E402
 from bot.conv import ConvMixin  # noqa: E402
 from bot.extras import ExtrasMixin, PlanBlocked  # noqa: E402
 from bot.lessons_cal import LessonsCalMixin  # noqa: E402
@@ -159,7 +160,7 @@ LLM_TOOL = {"type": "object",
             "required": ["actions", "reply"]}
 COMMANDS = {"/start", "/help", "עזרה", "/today", "היום", "/tomorrow", "מחר", "/exams", "מבחנים", "/check", "בדיקה",
             "/marathon", "מרתון", "/absences", "היעדרויות", "נוכחות", "/week", "שבוע", "/tasks", "משימות", "/why", "למה", "מה עשית", "מה הבנת",
-            "/schedule", "תזמונים", "זמני הודעות"}
+            "/schedule", "תזמונים", "זמני הודעות", "/material", "חומר", "נושאים"}
 
 
 def command_of(text: str) -> str | None:
@@ -267,6 +268,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         base.update(st)
         base.setdefault("offers", {})
         base.setdefault("log", [])
+        base.setdefault("topics", {})
         base.setdefault("prefs", {}).setdefault("dur", {})
         base.setdefault("bot", {})
         b = base["bot"]
@@ -449,6 +451,9 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         s["marked_at"] = P.iso(self.now)
         self.log_done_session(s)
         if status != "done":
+            for r in self.st.get("log", []):
+                if r.get("session") == s.get("key") and r.get("tinf"):
+                    TOP.unreview_est(self.st, r["course"], r["date"], r["tinf"])
             self.st["log"] = [r for r in self.st.get("log", []) if r.get("session") != s.get("key")]
         if s.get("eventId"):
             title = strip_marks(P._session_from_state(s).title())
@@ -1029,6 +1034,9 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
             lines[0] = f"📊 סיכום שבוע {ws.day}.{ws.month} עד {today.day}.{today.month}: " + (f"למדת {self.hm_text(tot)}" if tot else "לא נרשם לימוד השבוע")
             if wm:
                 lines += ["", "📈 לימוד בפועל: " + " · ".join(f"{COURSES[c]['name']} {m} דק׳" for c, m in sorted(wm.items(), key=lambda kv: -kv[1]))]
+            cov = [TOP.coverage_line(self.st, c, today) for c in P.COURSE_ORDER if TOP.stats(self.st, c, today)["learned"]]
+            if cov:
+                lines += ["", "🗺️ כיסוי חומר:"] + cov
             gaps = SUG.open_gaps(self.st, today, uni, self.now)
             if gaps:
                 lines.append("פערים פתוחים: " + ", ".join(sorted({COURSES[g["course"]]["name"] for g in gaps})))
@@ -1501,7 +1509,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         if meta.get("type") == "daily":
             self.tg.edit_buttons(mid, self.daily_buttons(date.fromisoformat(meta["date"])) + meta.get("offer", []))
 
-    def add_recap(self, d: str, course: str, rating=None, topics="", unclear="", cause=""):
+    def add_recap(self, d: str, course: str, rating=None, topics="", unclear="", cause="", topic_ids=None):
         cur = next((r for r in self.st["recaps"] if r["date"] == d and r["course"] == course), None)
         if not cur:
             cur = {"date": d, "course": course, "rating": None, "topics": "", "unclear": "", "at": P.iso(self.now)}
@@ -1515,6 +1523,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         if cause:
             cur["cause"] = (cur.get("cause", "") + "; " if cur.get("cause") else "") + cause
         if self.conv:
+            self.sync_topics(cur, topics, topic_ids)
             return ""         # בשיחה: ההמלצה לחיזוק מגיעה בשאלה "מתי נוח לך ללמוד", לא כהצעת שיבוץ אוטומטית
         if cur.get("rating") is not None and cur["rating"] <= 2:
             return self.maybe_reinforce(course, d, cur["rating"], cur.get("unclear", ""))
@@ -1549,6 +1558,9 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
             return
         if cmd in ("/check", "בדיקה"):
             self.tg.send(self.health_text("🔧 בדיקת חיבורים"))
+            return
+        if cmd in ("/material", "חומר", "נושאים"):
+            self.tg.send(TOP.material_text(self.st, today))
             return
         if cmd in ("/marathon", "מרתון"):
             self.tg.send(self.marathon_text())
@@ -1919,7 +1931,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
             d = a.get("date") or self.now.date().isoformat()
             rating = a.get("rating")
             rating = int(rating) if rating not in (None, "") and 1 <= int(rating) <= 5 else None
-            note = self.add_recap(d, c, rating, a.get("topics", ""), a.get("unclear", ""), a.get("cause", ""))
+            note = self.add_recap(d, c, rating, a.get("topics", ""), a.get("unclear", ""), a.get("cause", ""), a.get("topic_ids"))
             if self.conv:
                 if rating is not None and self.st["bot"]["attend"].get(f"{c}|{d}") is None:
                     self.st["bot"]["attend"][f"{c}|{d}"] = "present"
@@ -1927,6 +1939,8 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
                 if rating is not None:
                     self.rq_on_rating(d, c, rating)
             return f"📝 ריקאפ {COURSES[c]['name']} נשמר" + (f"\n{note}" if note else "")
+        if act == "topic_set":
+            return self.topic_set_action(a)
         if act == "recap_skip":
             c = a.get("course")
             if self.conv and c in COURSES:
@@ -2480,8 +2494,9 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 פעולות מותרות (השתמש רק ב-id מתוך sessions בהקשר, לעולם אל תמציא):
 {"action":"done","id":"..."}            סשן בוצע
 {"action":"missed","id":"..."}          סשן לא בוצע
-{"action":"recap","course":"math|intro|econ|stats|excel|law|mgmt","date":"YYYY-MM-DD","rating":1-5 או null,"topics":"מה נלמד","unclear":"מה לא ברור","cause":"מה הפריע (קצב, הסבר, רקע, ריכוז)"}
+{"action":"recap","course":"math|intro|econ|stats|excel|law|mgmt","date":"YYYY-MM-DD","rating":1-5 או null,"topics":"מה נלמד","unclear":"מה לא ברור","cause":"מה הפריע (קצב, הסבר, רקע, ריכוז)","topic_ids":[מספרי נושאים מ-recap_question.topics, אם ברור על איזה נושא מדובר]}
 {"action":"study_at","course":"...","start":"YYYY-MM-DDTHH:MM","minutes":מספר או null}   עודד קבע מתי ללמוד: הבוט קובע ביומן. אורך לא נאמר = null
+{"action":"topic_set","course":"...","ids":[מספרי נושאים],"op":"learned|reviewed|clear","date":"YYYY-MM-DD"}   תיקון מפת החומר: "לא למדנו את X" = clear, "חזרתי על X" = reviewed
 {"action":"recap_skip","course":"...","date":"YYYY-MM-DD"}   דילוג על שאלות הריקאפ של קורס
 {"action":"studied","course":"...","date":"YYYY-MM-DD","minutes":מספר או null,"topic":"מה למד"}   עודד אמר שלמד (גם בלי סשן ביומן)
 {"action":"assignment","course":"...","title":"...","due":"YYYY-MM-DD או null","est_min":מספר או null}
@@ -2540,6 +2555,7 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
   ארוחה = שעתיים; פגישה, תור או סידור = שעה. ב-reply כתוב ששעת הסיום משוערת. בלי שעת התחלה בכלל (רק "בערב") = שאל באיזו שעה.
 - אם recap_question פעיל ועודד עונה עליו בטקסט: recap לאותו קורס ותאריך. kind=topics: מלא topics. kind=unclear: מלא unclear.
   kind=cause: מלא cause. אל תמלא שדה שלא נשאל עליו. אם הוא מבקש לדלג: {"action":"recap_skip","course":"...","date":"..."}.
+- מפת חומר: ב-recap_question.topics יש נושאי הקורס עם מספר. כשעודד אומר מה נלמד, מלא topic_ids עם המספרים התואמים (רק אם ברור). אל תמציא נושאים.
 - "אני לומד ב-17:00 חצי שעה מתמטיקה" = study_at (לא extra). "למדתי היום שעה סטטיסטיקה" = studied.
 - אם recap_context פעיל ועודד מתאר שיעורים, צור recap לכל קורס שהזכיר, בתאריך של recap_context.
 - תאריכים יחסיים ("מחר", "ביום רביעי") מחשבים מ-now. "הסופ"ש" = שישי ושבת. "הסופ"ש הבא" = שישי ושבת של השבוע הבא.
