@@ -18,6 +18,7 @@ from statistics import median
 
 import planner as P
 from bot import semester as SEM
+from bot import topics as TOP
 
 MIN_WINDOW = 25            # חלון קצר מזה לא מוצע
 MAX_WINDOW = 120           # חלון אחד מוצע עד שעתיים
@@ -123,6 +124,18 @@ def recommend(st: dict, today: date, uni: P.Uni, now: datetime, limit: int = 2) 
                 x = row(a["course"])
                 x["score"] += 3
                 x["why"].append(f"מטלה עד {date.fromisoformat(a['due']).day}.{date.fromisoformat(a['due']).month}")
+    for c in P.COURSE_ORDER:
+        if c not in st.get("topics", {}):
+            continue
+        sx = TOP.stats(st, c, today)
+        if sx["weak"]:
+            x = row(c)
+            x["score"] += min(3, 1 + len(sx["weak"]))
+            x["why"].append("נושא חלש: " + sx["weak"][0].split(":")[0][:25])
+        if sx["pending"]:
+            x = row(c)
+            x["score"] += 1
+            x["why"].append(f"{len(sx['pending'])} נושאים ממתינים לחזרה")
     out = [x for x in per.values() if x["score"] > 0]
     out.sort(key=lambda x: (-x["score"], P.COURSE_ORDER.index(x["course"])))
     return out[:limit]

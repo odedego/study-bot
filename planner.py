@@ -930,7 +930,7 @@ def new_state() -> dict:
     return {"version": 1, "updated": None, "pins": [], "sessions": [], "recaps": [], "assignments": [], "tasks": [],
             "course_kind": {c: COURSES[c]["kind"] for c in COURSE_ORDER}, "pending_questions": [], "runs": [],
             "notified": {}, "acked": [], "archive": {}, "archived_keys": [],
-            "offers": {}, "log": [], "prefs": {"dur": {}}}
+            "offers": {}, "log": [], "prefs": {"dur": {}}, "topics": {}}
 
 
 _MD_ESC = re.compile(r"\\([\\\[\]_*#`>~|{}()+\-.!<])")

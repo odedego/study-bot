@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta
 import planner as P
 from bot import semester as SEM
 from bot import suggest as SUG
+from bot import topics as TOP
 
 COURSES = P.COURSES
 
@@ -54,6 +55,10 @@ class ConvMixin:
             return None
         return {"course": cur["c"], "date": r["date"], "kind": cur["k"], "asked": cur["text"].split("\n")[0]}
 
+    def material_for_llm(self) -> dict:
+        """מספרי הנושאים לכל קורס, תמיד בהקשר: כך Claude משייך ומתקן גם מחוץ לשאלת ריקאפ."""
+        return {c: [[i, t["name"][:32]] for i, t in TOP.live(self.st, c)] for c in P.COURSE_ORDER if TOP.live(self.st, c)}
+
     def rq_close(self, ds: str | None = None):
         r = self.rq(ds)
         if r:
@@ -70,7 +75,16 @@ class ConvMixin:
             return self.deferred(lambda: self.rq_check_final(ds))
         if c not in r["courses"]:
             return
-        kinds = ["topics"] if rating >= 4 else ["unclear", "cause"]
+        sug_i = TOP.index_of(self.st, c, self.rq_suggestion(c, ds))
+        if rating >= 4:
+            kinds = ["topics"]
+        elif sug_i is not None:
+            self.add_recap(ds, c, topic_ids=[sug_i])          # נושא השבוע לפי הסילבוס: משויך בלי לשאול
+            kinds = ["unclear", "cause"]
+        elif TOP.next_unlearned(self.st, c, 1):
+            kinds = ["topics", "unclear", "cause"]            # קודם מה עברתם, כדי שהחולשה תיצמד לנושא
+        else:
+            kinds = ["unclear", "cause"]
         for k in kinds:
             tag = f"{c}|{k}"
             if tag in r["asked"]:
@@ -94,10 +108,16 @@ class ConvMixin:
         sug = self.rq_suggestion(c, ds)
         pre = f"rqa|{ds}|{c}|"
         skip = ("⏭️ דלג", pre + "skip")
+        cands = TOP.next_unlearned(self.st, c, 3)
+        tp = TOP.ensure(self.st, c)
+        trows = [[("📌 " + tp[i]["name"].split(":")[0][:32], pre + f"t{i}")] for i in cands]
         if k == "topics":
             if sug:
                 text = f"{name}: מה עברתם היום?\nלפי הסילבוס: {sug}"
                 rows = [[("✔️ כן, זה", pre + "ok"), ("✏️ משהו אחר", pre + "w")], [skip]]
+            elif trows:
+                text = f"{name}: מה עברתם היום? (הנושאים הבאים בסילבוס, או כתוב לי)"
+                rows = trows + [[("✏️ משהו אחר", pre + "w"), skip]]
             else:
                 text = f"{name}: מה עברתם היום? כתוב לי בקצרה."
                 rows = [[skip]]
@@ -107,6 +127,8 @@ class ConvMixin:
             rows = [first, [("🌫️ " + UNCLEAR_OPTS["u3"], pre + "u3"), ("✏️ אכתוב", pre + "w")]]
             if sug:
                 rows.insert(0, [("📌 " + sug[:30], pre + "u0")])
+            else:
+                rows = trows + rows
             rows.append([skip])
         else:
             text = f"{name}: מה הכי הפריע?"
@@ -144,14 +166,23 @@ class ConvMixin:
             cur["await_text"] = True
             return "כתוב לי בהודעה"
         k = cur["k"]
-        if k == "topics" and code == "ok":
-            self.add_recap(ds, c, topics=cur.get("sug", ""))
+        tp = TOP.ensure(self.st, c)
+        if code.startswith("t") and code[1:].isdigit() and int(code[1:]) < len(tp) and k in ("topics", "unclear"):
+            i = int(code[1:])
+            if k == "topics":
+                self.add_recap(ds, c, topics=tp[i]["name"], topic_ids=[i])
+            else:
+                self.add_recap(ds, c, unclear=f"הנושא: {tp[i]['name'][:60]}", topic_ids=[i])
+            shown = f"✔️ {tp[i]['name'].split(':')[0][:40]}"
+        elif k == "topics" and code == "ok":
+            self.add_recap(ds, c, topics=cur.get("sug", ""), topic_ids=[x for x in [TOP.index_of(self.st, c, cur.get("sug", ""))] if x is not None])
             shown = f"✔️ {cur.get('sug', '')}"
         elif k == "unclear" and code in UNCLEAR_OPTS:
             self.add_recap(ds, c, unclear=UNCLEAR_OPTS[code])
             shown = f"✔️ {UNCLEAR_OPTS[code]}"
         elif k == "unclear" and code == "u0":
-            self.add_recap(ds, c, unclear=f"הנושא: {cur.get('sug', '')}")
+            self.add_recap(ds, c, unclear=f"הנושא: {cur.get('sug', '')}",
+                           topic_ids=[x for x in [TOP.index_of(self.st, c, cur.get("sug", ""))] if x is not None])
             shown = f"✔️ {cur.get('sug', '')}"
         elif k == "cause" and code in CAUSE_OPTS:
             self.add_recap(ds, c, cause=CAUSE_OPTS[code])
@@ -309,7 +340,10 @@ class ConvMixin:
         if any(r.get("session") == s["key"] for r in self.st.get("log", [])):
             return
         mins = s.get("min") or int((datetime.fromisoformat(s["end"]) - datetime.fromisoformat(s["start"])).total_seconds() // 60)
-        SUG.log_study(self.st, s["start"][:10], s["course"], mins, None, "session", P.iso(self.now), s["key"])
+        row = SUG.log_study(self.st, s["start"][:10], s["course"], mins, None, "session", P.iso(self.now), s["key"])
+        inf = TOP.infer_review(self.st, s["course"], s["start"][:10])
+        if inf:
+            row["tinf"] = inf
 
     def studied_action(self, a: dict) -> str:
         c = a.get("course")
@@ -322,8 +356,16 @@ class ConvMixin:
             m = int(m) if m not in (None, "", 0) else None
         except (TypeError, ValueError):
             return "לא הבנתי כמה דקות למדת. כתוב לי מספר."
-        SUG.log_study(self.st, d, c, m, a.get("topic"), "text", P.iso(self.now))
-        return f"✅ רשמתי: {COURSES[c]['name']}" + (f", {m} דק׳" if m else "")
+        row = SUG.log_study(self.st, d, c, m, a.get("topic"), "text", P.iso(self.now))
+        ids = TOP.valid_ids(self.st, c, a.get("topic_ids")) or (TOP.match(self.st, c, a.get("topic") or "") if a.get("topic") else [])
+        if ids:
+            TOP.mark_reviewed(self.st, c, d, ids, est=False)
+        elif not any(r is not row and r.get("session") and r.get("course") == c and r.get("date") == d for r in self.st["log"]):
+            inf = TOP.infer_review(self.st, c, d)          # אם כבר יש סשן באותו יום, לא סופרים אותו לימוד כפול
+            if inf:
+                row["tinf"] = inf
+        tail = f" · נחזר: {TOP.label(self.st, c, ids)}" if ids else ""
+        return f"✅ רשמתי: {COURSES[c]['name']}" + (f", {m} דק׳" if m else "") + tail
 
     def study_at_action(self, a: dict) -> str:
         c = a.get("course")
@@ -407,6 +449,39 @@ class ConvMixin:
             out += ["", "פערים פתוחים (שיעור בלי לימוד אחריו): " + ", ".join(names)]
         out += ["", "מתי נוח לך לחזק? כתוב לי יום ושעה ואקבע."]
         return "\n".join(out)
+
+    # ------------------------------------------------------------ מפת חומר (יעד 1)
+    def sync_topics(self, rec: dict, topics_text: str = "", topic_ids=None):
+        """ריקאפ ← מפת החומר: נושא שנלמד ביום הריקאפ, עם ההבנה ומה שלא היה ברור. שיוך: מספרים מ-Claude, אחרת התאמת מילים."""
+        c, d = rec["course"], rec["date"]
+        ids = TOP.valid_ids(self.st, c, topic_ids)
+        if not ids and topics_text:
+            ids = TOP.match(self.st, c, topics_text)
+        if ids:
+            rec["tids"] = sorted(set(rec.get("tids", [])) | set(ids))
+        if rec.get("tids"):
+            TOP.mark_learned(self.st, c, d, rec["tids"], rec.get("rating"), rec.get("unclear", ""))
+        return ids
+
+    def topic_set_action(self, a: dict) -> str:
+        c = a.get("course")
+        if c not in COURSES:
+            raise ValueError("קורס לא ידוע")
+        ids = TOP.valid_ids(self.st, c, a.get("ids"))
+        if not ids:
+            return "לא הצלחתי לזהות איזה נושא. כתוב \"חומר\" כדי לראות את הרשימה."
+        d = a.get("date") or self.now.date().isoformat()
+        op = a.get("op")
+        if op == "clear":
+            TOP.clear_topic(self.st, c, ids, a.get("date") or None)
+        elif op == "reviewed":
+            TOP.mark_reviewed(self.st, c, d, ids, est=False)
+        elif op == "learned":
+            TOP.mark_learned(self.st, c, d, ids)
+        else:
+            return "לא הבנתי מה לעדכן בנושא."
+        verb = {"clear": "הוסר", "reviewed": "נרשם כנחזר", "learned": "נרשם כנלמד"}[op]
+        return f"🗺️ {verb}: {COURSES[c]['name']} · {TOP.label(self.st, c, ids)}"
 
     # ------------------------------------------------------------ מעבר ל-v2 (שלב G)
     MIG_KINDS = ("review", "weekly", "rescheduled", "marathon")
