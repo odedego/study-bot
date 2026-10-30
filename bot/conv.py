@@ -40,6 +40,10 @@ class ConvMixin:
         return r
 
     def rq_open(self, ds: str, courses: list[str]):
+        cur = self.rq(ds)
+        if cur:                       # ריקאפ חוזר באותו יום: ממשיכים את אותה שיחה
+            cur["courses"] = list(courses)
+            return
         self.st["bot"]["rq"] = {"date": ds, "courses": list(courses), "queue": [], "cur": None, "asked": [],
                                "final": False, "closed": False}
 
@@ -50,8 +54,8 @@ class ConvMixin:
             return None
         return {"course": cur["c"], "date": r["date"], "kind": cur["k"], "asked": cur["text"].split("\n")[0]}
 
-    def rq_close(self):
-        r = self.rq()
+    def rq_close(self, ds: str | None = None):
+        r = self.rq(ds)
         if r:
             r["closed"] = True
             r["queue"] = []
@@ -84,7 +88,7 @@ class ConvMixin:
             return
         if not r["queue"]:
             return self.rq_check_final(ds)
-        q = r["queue"].pop(0)
+        q = r["queue"][0]
         c, k = q["c"], q["k"]
         name = COURSES[c]["name"]
         sug = self.rq_suggestion(c, ds)
@@ -110,6 +114,7 @@ class ConvMixin:
                     [("📉 " + CAUSE_OPTS["k3"], pre + "k3"), ("😴 " + CAUSE_OPTS["k4"], pre + "k4")],
                     [("✏️ אכתוב", pre + "w"), skip]]
         mid = self.tg.send(text, rows)
+        r["queue"].pop(0)
         r["cur"] = {"c": c, "k": k, "mid": mid, "text": text, "sug": sug, "at": P.iso(self.now)}
 
     def _rq_finish_cur(self, shown: str):
@@ -157,15 +162,25 @@ class ConvMixin:
         self.deferred(lambda: self.rq_ask_next(ds))
         return "נרשם"
 
+    def rq_skip_course(self, ds: str, c: str):
+        r = self.rq(ds)
+        if not r or r["closed"]:
+            return
+        r["queue"] = [q for q in r["queue"] if q["c"] != c]
+        if r["cur"] and r["cur"]["c"] == c:
+            self._rq_finish_cur("⏭️ דולג")
+        self.deferred(lambda: self.rq_ask_next(ds))
+
     def rq_text_progress(self, ds: str, c: str, topics: str = "", unclear: str = "", cause: str = ""):
         """תשובה חופשית (דרך Claude) לשאלה הפתוחה: אם היא מכסה את מה שנשאל, ממשיכים לשאלה הבאה."""
         r = self.rq(ds)
         cur = r["cur"] if r else None
         if not r or r["closed"] or not cur or cur["c"] != c:
             return
-        got = {"topics": topics, "unclear": unclear, "cause": cause}.get(cur["k"], "")
+        got = topics or unclear or cause
         if not got:
             return
+        r["queue"] = [q for q in r["queue"] if not (q["c"] == c and q["k"] == "cause" and cause)]
         self._rq_finish_cur("✔️ " + got[:60])
         self.deferred(lambda: self.rq_ask_next(ds))
 
@@ -185,8 +200,8 @@ class ConvMixin:
         r = self.rq(ds)
         if not r or r["closed"] or r["final"] or not self.rq_resolved(ds, r):
             return
-        r["final"] = True
         self.rq_final(ds)
+        r["final"] = True
 
     def study_windows(self, day: date) -> list:
         try:
@@ -235,7 +250,7 @@ class ConvMixin:
     def on_sa_callback(self, parts: list[str], mid) -> str:
         ds = parts[1]
         if parts[2] == "no":
-            self.rq_close()
+            self.rq_close(ds)
             self._drop_offer(mid)
             return "בסדר, יום טוב"
         _, _, hhmm, c, m = parts
@@ -243,7 +258,7 @@ class ConvMixin:
         start = P.at(d, datetime.strptime(hhmm, "%H%M").time())
         msg = self.book_study(c, start, int(m), "button")
         if msg.startswith("✅"):
-            self.rq_close()
+            self.rq_close(ds)
             self._drop_offer(mid)
         self.tg.send(msg)
         return "נקבע" if msg.startswith("✅") else "לא נקבע"
@@ -252,9 +267,15 @@ class ConvMixin:
         """עודד החליט מתי: הבוט רושם ביומן החזרות ומדווח. לא משבץ ולא מזיז בלי בקשה."""
         if c not in COURSES:
             raise ValueError("קורס לא ידוע")
-        minutes = int(minutes) if minutes else SUG.minutes_for(c, self.st)
+        try:
+            minutes = int(minutes) if minutes else SUG.minutes_for(c, self.st)
+        except (TypeError, ValueError):
+            return "לא הבנתי כמה דקות. כתוב לי מספר, למשל 30."
         minutes = max(10, min(minutes, 240))
         end = start + timedelta(minutes=minutes)
+        if start.hour < 6 or end.date() != start.date():
+            if not late_ok or end.date() != start.date():
+                return "השעה לא סבירה ללימוד (לפני 06:00 או אחרי חצות). כתוב לי שעה אחרת."
         name = COURSES[c]["name"]
         if start <= self.now:
             return f"השעה {P.fmt_t(start)} כבר עברה. כתוב לי שעה מאוחרת יותר."
@@ -270,6 +291,8 @@ class ConvMixin:
                 return f"זה מתנגש עם {'שיעור' if x[2] == 'lesson' else 'אירוע ביומן'} ({P.fmt_t(x[0])} עד {P.fmt_t(x[1])}). איזו שעה מתאימה?"
         for s in self.st["sessions"]:
             if s.get("status") == "planned" and datetime.fromisoformat(s["start"]) < end and start < datetime.fromisoformat(s["end"]):
+                if s.get("src") in ("button", "text") and s.get("course") == c and datetime.fromisoformat(s["start"]) == start:
+                    return f"✅ כבר נקבע: {name}, {s['start'][11:16]}"
                 return f"כבר יש סשן ב-{s['start'][11:16]}. כתוב לי אם להזיז אותו."
         key = self.unique_key(f"study:{c}:{start:%Y%m%dT%H%M}")
         sess = P.Session(key, "extra", c, [c], start, end, None, note="נקבע לפי בחירתך", label=f"📚 {name}")
@@ -294,16 +317,26 @@ class ConvMixin:
             raise ValueError("קורס לא ידוע")
         d = a.get("date") or self.now.date().isoformat()
         date.fromisoformat(d)
-        m = a.get("minutes")
-        m = int(m) if m not in (None, "", 0) else None
+        try:
+            m = a.get("minutes")
+            m = int(m) if m not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            return "לא הבנתי כמה דקות למדת. כתוב לי מספר."
         SUG.log_study(self.st, d, c, m, a.get("topic"), "text", P.iso(self.now))
         return f"✅ רשמתי: {COURSES[c]['name']}" + (f", {m} דק׳" if m else "")
 
     def study_at_action(self, a: dict) -> str:
         c = a.get("course")
-        start = datetime.fromisoformat(a["start"])
+        raw = str(a.get("start") or "")
+        if "T" not in raw and " " not in raw.strip():
+            return "באיזו שעה? כתוב לי יום ושעה ואקבע."
+        try:
+            start = datetime.fromisoformat(raw.strip())
+        except ValueError:
+            return "לא הבנתי את השעה. כתוב לי יום ושעה, למשל מחר 17:00."
         if start.tzinfo is None:
             start = start.replace(tzinfo=P.TZ)
+        start = start.astimezone(P.TZ)
         return self.book_study(c, start, a.get("minutes"), "text", late_ok=bool(a.get("late_ok")))
 
     # ------------------------------------------------------------ הודעות קבועות (שלב F)

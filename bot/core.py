@@ -448,6 +448,8 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         s["status"] = status
         s["marked_at"] = P.iso(self.now)
         self.log_done_session(s)
+        if status != "done":
+            self.st["log"] = [r for r in self.st.get("log", []) if r.get("session") != s.get("key")]
         if s.get("eventId"):
             title = strip_marks(P._session_from_state(s).title())
             prefix = {"done": "✅ ", "missed": "❌ "}.get(status, "")
@@ -952,8 +954,8 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         return rows
 
     def job_daily(self, today: date):
-        if self.conv:
-            self.rq_close()      # שאלות ריקאפ שלא נענו עד 21:30 פגות בשקט
+        if self.conv and self.now.time() >= time(21, 0):
+            self.rq_close()      # שאלות ריקאפ שלא נענו עד 21:30 פגות בשקט (לא בבקשת "סיכום" באמצע היום)
         uni, _ = self.load_uni()
         personal = self.load_personal(P.week_start(today))
         rd = P.review_data(today, uni, personal, self.st)
@@ -1378,7 +1380,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
             for c in meta.get("courses", []):
                 if self.st["bot"]["attend"].get(f"{c}|{d}") != "present":
                     continue          # דירוג רק לשיעורים שהיית בהם
-                if not any(r["date"] == d and r["course"] == c for r in self.st["recaps"]):
+                if not any(r["date"] == d and r["course"] == c and r.get("rating") for r in self.st["recaps"]):
                     self.add_recap(d, c, rating=5)
             reply = "נרשם. יום טוב!"
             self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [])))
@@ -1439,6 +1441,8 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
                 self.st["bot"]["attend"].setdefault(f"{c}|{d}", "present")
             reply = "🙋 נרשם. עכשיו דירוג הבנה"
             self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [])))
+            if self.conv:
+                self.deferred(lambda: self.rq_check_final(d))
         elif kind == "pp":
             _, act, pid = parts
             reply = self.exec_personal(pid) if act == "ok" else self.cancel_personal(pid)
@@ -1917,8 +1921,17 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
             rating = int(rating) if rating not in (None, "") and 1 <= int(rating) <= 5 else None
             note = self.add_recap(d, c, rating, a.get("topics", ""), a.get("unclear", ""), a.get("cause", ""))
             if self.conv:
+                if rating is not None and self.st["bot"]["attend"].get(f"{c}|{d}") is None:
+                    self.st["bot"]["attend"][f"{c}|{d}"] = "present"
                 self.rq_text_progress(d, c, a.get("topics", ""), a.get("unclear", ""), a.get("cause", ""))
+                if rating is not None:
+                    self.rq_on_rating(d, c, rating)
             return f"📝 ריקאפ {COURSES[c]['name']} נשמר" + (f"\n{note}" if note else "")
+        if act == "recap_skip":
+            c = a.get("course")
+            if self.conv and c in COURSES:
+                self.rq_skip_course(a.get("date") or self.now.date().isoformat(), c)
+            return "⏭️ דילגתי"
         if act == "study_at":
             return self.study_at_action(a)
         if act == "studied":
@@ -2026,7 +2039,9 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         if act == "attendance":
             d = a.get("date") or self.now.date().isoformat()
             out = "🙋 " + self.set_attendance(a.get("course"), d, a.get("status"), quiet=True)
-            note = self.propose_makeup(a.get("course"), d) if a.get("status") == "absent" else ""
+            note = self.propose_makeup(a.get("course"), d) if a.get("status") == "absent" and not self.conv else ""
+            if self.conv:
+                self.deferred(lambda: self.rq_check_final(d))
             return out + (f"\n{note}" if note else "")
         if act == "personal":
             return self.propose_personal(a)
@@ -2419,7 +2434,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
 
 FREEZE_RULES = ("כרגע הבוט לא משבץ ולא מזיז סשני למידה לבד. עודד קובע בעצמו מתי ללמוד, והבוט מציע ומתעד רק לבקשתו ובאישורו. "
                 "סשנים שכבר ביומן נשארים כמו שהם. אל תבטיח שיבוץ מחדש, שיבוץ אוטומטי או הזזת עודף. "
-                "הבוט מציע ושואל, ועודד מחליט מתי ללמוד (study_at). אורך סשן גמיש, לא חייב 50 דקות. "
+                "הבוט מציע ושואל, ועודד מחליט מתי ללמוד (study_at). אורך סשן גמיש, לא חייב 50 דקות. אם עודד מבקש במפורש study_at בשבת או בשישי אחרי 16:00, מותר לבצע (הוא רשאי לתאם). "
                 "כללים שנשארים: בלי שבת, שישי עד 16:00, אף פעם אחרי 23:00. יום חמישי: פנוי ללמוד עד 13:45 (תחילת השיעורים).")
 
 PLANNING_RULES = ("אחרי כל שיעור הבוט משבץ חזרה (סשן של 50 דקות) בימים הקרובים, לפי יעד סשנים שבועי לכל קורס (weekly_targets). "
@@ -2467,6 +2482,7 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 {"action":"missed","id":"..."}          סשן לא בוצע
 {"action":"recap","course":"math|intro|econ|stats|excel|law|mgmt","date":"YYYY-MM-DD","rating":1-5 או null,"topics":"מה נלמד","unclear":"מה לא ברור","cause":"מה הפריע (קצב, הסבר, רקע, ריכוז)"}
 {"action":"study_at","course":"...","start":"YYYY-MM-DDTHH:MM","minutes":מספר או null}   עודד קבע מתי ללמוד: הבוט קובע ביומן. אורך לא נאמר = null
+{"action":"recap_skip","course":"...","date":"YYYY-MM-DD"}   דילוג על שאלות הריקאפ של קורס
 {"action":"studied","course":"...","date":"YYYY-MM-DD","minutes":מספר או null,"topic":"מה למד"}   עודד אמר שלמד (גם בלי סשן ביומן)
 {"action":"assignment","course":"...","title":"...","due":"YYYY-MM-DD או null","est_min":מספר או null}
 {"action":"assignment_done","id":"..."}
@@ -2523,7 +2539,7 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 - personal עם op=create: תמלא תמיד end. אם לא נאמרה שעת סיום: חתונה, בר/בת מצווה, אירוע ערב או מסיבה = 4 שעות;
   ארוחה = שעתיים; פגישה, תור או סידור = שעה. ב-reply כתוב ששעת הסיום משוערת. בלי שעת התחלה בכלל (רק "בערב") = שאל באיזו שעה.
 - אם recap_question פעיל ועודד עונה עליו בטקסט: recap לאותו קורס ותאריך. kind=topics: מלא topics. kind=unclear: מלא unclear.
-  kind=cause: מלא cause. אל תמלא שדה שלא נשאל עליו. אם הוא מבקש לדלג, אל תיצור פעולה ואמור שדילגת.
+  kind=cause: מלא cause. אל תמלא שדה שלא נשאל עליו. אם הוא מבקש לדלג: {"action":"recap_skip","course":"...","date":"..."}.
 - "אני לומד ב-17:00 חצי שעה מתמטיקה" = study_at (לא extra). "למדתי היום שעה סטטיסטיקה" = studied.
 - אם recap_context פעיל ועודד מתאר שיעורים, צור recap לכל קורס שהזכיר, בתאריך של recap_context.
 - תאריכים יחסיים ("מחר", "ביום רביעי") מחשבים מ-now. "הסופ"ש" = שישי ושבת. "הסופ"ש הבא" = שישי ושבת של השבוע הבא.
