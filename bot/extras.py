@@ -246,8 +246,8 @@ class ExtrasMixin:
     def maybe_assignment_time(self, a: dict) -> str:
         """מטלה של שעה ומעלה עם תאריך הגשה: עד 2 סשני עבודה לפני ההגשה (מוקדם ככל האפשר)."""
         est, due = a.get("est_min"), a.get("due")
-        if not est or not due or int(est) < 60 or a.get("work_offered"):
-            return ""
+        if self.conv or not est or not due or int(est) < 60 or a.get("work_offered"):
+            return ""         # בשיחה: מטלה קרובה נכנסת להמלצות, לא להצעת שיבוץ אוטומטית
         try:
             due_d = date.fromisoformat(due[:10])
         except ValueError:

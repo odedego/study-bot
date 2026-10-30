@@ -223,18 +223,28 @@ class ConvMixin:
         self.tg.send("\n".join(lines), rows)
 
     # ------------------------------------------------------------ קביעת סשן לפי בחירתו
+    def _drop_offer(self, mid):
+        """אחרי בחירה: מורידים את כפתורי ההצעה. בסיכום היומי נשארים כפתורי הסימון."""
+        meta = self.st["bot"]["msgs"].get(str(mid), {})
+        if meta.get("type") == "daily":
+            meta["offer"] = []
+            self.refresh_daily(mid)
+        else:
+            self.tg.edit_buttons(mid, [])
+
     def on_sa_callback(self, parts: list[str], mid) -> str:
         ds = parts[1]
         if parts[2] == "no":
             self.rq_close()
-            self.tg.edit_buttons(mid, [])
+            self._drop_offer(mid)
             return "בסדר, יום טוב"
         _, _, hhmm, c, m = parts
         d = date.fromisoformat(ds)
         start = P.at(d, datetime.strptime(hhmm, "%H%M").time())
         msg = self.book_study(c, start, int(m), "button")
-        self.rq_close()
-        self.tg.edit_buttons(mid, [])
+        if msg.startswith("✅"):
+            self.rq_close()
+            self._drop_offer(mid)
         self.tg.send(msg)
         return "נקבע" if msg.startswith("✅") else "לא נקבע"
 
@@ -295,3 +305,71 @@ class ConvMixin:
         if start.tzinfo is None:
             start = start.replace(tzinfo=P.TZ)
         return self.book_study(c, start, a.get("minutes"), "text", late_ok=bool(a.get("late_ok")))
+
+    # ------------------------------------------------------------ הודעות קבועות (שלב F)
+    def week_minutes(self, ws: date) -> dict:
+        """דקות לימוד בפועל לפי קורס בשבוע שמתחיל ב-ws (מיומן הלימוד)."""
+        lo, hi = ws.isoformat(), (ws + timedelta(days=7)).isoformat()
+        out: dict[str, int] = {}
+        for r in self.st.get("log", []):
+            if lo <= r.get("date", "") < hi and r.get("course") in COURSES:
+                out[r["course"]] = out.get(r["course"], 0) + int(r.get("min") or 0)
+        return out
+
+    @staticmethod
+    def hm_text(minutes: int) -> str:
+        h, m = divmod(int(minutes), 60)
+        return (f"{h} שעות" if h > 1 else "שעה" if h == 1 else "") + (" ו" if h and m else "") + (f"{m} דק׳" if m else "") or "0 דק׳"
+
+    def pick_course(self, today: date, uni) -> str | None:
+        recs = SUG.recommend(self.st, today, uni, self.now)
+        if recs:
+            return recs[0]["course"]
+        up = [c for c, _dt, _n in SEM.upcoming_exams(today) if c in COURSES]
+        return up[0] if up else None
+
+    def evening_block(self, today: date, uni, personal) -> tuple[list[str], list]:
+        """בסיכום 21:30: מחר יום בלי לימודים (או חצי יום פנוי, כמו חמישי עד 13:45): חלונות והשאלה מתי נוח."""
+        o = SUG.evening_offer(today, uni, personal, self.st, self.now)
+        if not o:
+            return [], []
+        tm = date.fromisoformat(o["date"])
+        c = self.pick_course(today, uni)
+        recs = SUG.recommend(self.st, today, uni, self.now)
+        head = "מחר אפשר ללמוד עד 13:45 (השיעורים מתחילים אז)." if o["kind"] == "half" else "מחר אין לימודים."
+        lines = ["", f"{head} מתי נוח לך ללמוד?"]
+        if recs:
+            lines.append("מומלץ לחזק: " + "; ".join(f"{COURSES[x['course']]['name']} ({', '.join(x['why'][:2])})" for x in recs))
+        rows = []
+        if c:
+            for a, b in o["windows"]:
+                a, b = datetime.fromisoformat(a), datetime.fromisoformat(b)
+                m = min(SUG.minutes_for(c, self.st), int((b - a).total_seconds() // 60))
+                rows.append([(f"{P.fmt_t(a)} · {m} דק׳ · {COURSES[c]['name']}", f"sa|{tm.isoformat()}|{a:%H%M}|{c}|{m}")])
+        return lines, rows
+
+    def morning_reco_line(self, today: date, uni) -> str:
+        if today.weekday() in P.CONFIG["closed_weekdays"]:
+            return ""
+        recs = SUG.recommend(self.st, today, uni, self.now, limit=1)
+        if not recs:
+            return ""
+        x = recs[0]
+        return f"💪 כדאי לחזק היום: {COURSES[x['course']]['name']} ({', '.join(x['why'][:2])})"
+
+    def conv_weak_text(self, today: date) -> str:
+        """הודעת חיזוק בשני וחמישי: מה לחזק ולמה. בלי הצעת שיבוץ, שואלת מתי נוח."""
+        uni, _ = self.load_uni()
+        lines = P.weak_lines(self.st, today)
+        gaps = SUG.open_gaps(self.st, today, uni, self.now)
+        if not lines and not gaps:
+            return ""
+        out = ["💪 מה צריך חיזוק (שבועיים אחרונים)"] + lines
+        if gaps:
+            names = []
+            for g in gaps[:6]:
+                d = date.fromisoformat(g["day"])
+                names.append(f"{COURSES[g['course']]['name']} {d.day}.{d.month}")
+            out += ["", "פערים פתוחים (שיעור בלי לימוד אחריו): " + ", ".join(names)]
+        out += ["", "מתי נוח לך לחזק? כתוב לי יום ושעה ואקבע."]
+        return "\n".join(out)

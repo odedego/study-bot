@@ -26,6 +26,7 @@ from datetime import date, datetime, time, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import planner as P  # noqa: E402
 from bot import semester as SEM  # noqa: E402
+from bot import suggest as SUG  # noqa: E402
 from bot.conv import ConvMixin  # noqa: E402
 from bot.extras import ExtrasMixin, PlanBlocked  # noqa: E402
 from bot.lessons_cal import LessonsCalMixin  # noqa: E402
@@ -793,6 +794,10 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
             lines += ls + self.sess_lines(ss)
         else:
             lines.append("היום אין שיעורים ואין סשנים.")
+        if self.conv:
+            rl = self.morning_reco_line(today, uni)
+            if rl:
+                lines += ["", rl]
         mlines = self.marathon_morning()
         if mlines:
             lines += [""] + mlines
@@ -962,7 +967,11 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         else:
             lines.append("לא היו סשנים היום.")
         prog = rd["week_progress"]
-        if prog:
+        if self.conv:
+            wm = self.week_minutes(P.week_start(today))
+            if wm:
+                lines += ["", "📈 השבוע: " + " · ".join(f"{COURSES[c]['name']} {m} דק׳" for c, m in wm.items())]
+        elif prog:
             lines += ["", "📈 השבוע: " + " · ".join(f"{n} {v['done']}/{v['planned']}" for n, v in prog.items())]
         t = rd["tomorrow"]
         tn = dup_numbers([s["title"] for s in t["sessions"]])
@@ -976,11 +985,15 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         openq = [q for q in rd["pending_questions"] if not str(q.get("id", "")).startswith(("dup", "cap-"))][-3:]
         if openq:
             lines += ["", "❔ פתוח:"] + [f"• {q['text']}" for q in openq[:3]]
-        if not self.frozen:
+        offer_rows = []
+        if self.conv:
+            ol, offer_rows = self.evening_block(today, uni, personal)
+            lines += ol
+        elif not self.frozen:
             lines += ["", "אפשר לכתוב לי קיבולת למחר (\"מחר פנוי כל היום\" / \"מחר רק סשן אחד\")."]
         self.st["bot"]["msgs"][f"daily:{today.isoformat()}"] = {"keys": keys}
-        mid = self.tg.send("\n".join(lines), self.daily_buttons(today) or None)
-        self.st["bot"]["msgs"][str(mid)] = {"type": "daily", "date": today.isoformat()}
+        mid = self.tg.send("\n".join(lines), (self.daily_buttons(today) + offer_rows) or None)
+        self.st["bot"]["msgs"][str(mid)] = {"type": "daily", "date": today.isoformat(), "offer": offer_rows}
 
     def ask_weekend(self, today: date):
         """אין סיכום יומי בשישי, אז במוצ״ש שואלים על סשנים של שישי/שבת שלא סומנו (אחרת בבוקר הם ישובצו מחדש)."""
@@ -997,7 +1010,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         self.st["bot"]["msgs"][str(mid)] = {"type": "daily", "date": today.isoformat()}
 
     def job_reinforce(self, today: date):
-        text = P.weak_report(self.st, today)
+        text = self.conv_weak_text(today) if self.conv else P.weak_report(self.st, today)
         if text:                      # אין נושא חלש: לא שולחים כלום
             self.tg.send(text)
 
@@ -1008,8 +1021,17 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         """שורת סיכום + בלוקים 📈 📚 📝 🔍. קריאה בלבד (משמש גם את "סיכום שבוע" לפי בקשה)."""
         rep = P.week_report(ws, self.st, self.now, uni)
         lines = [f"📊 סיכום שבוע {ws.day}.{ws.month} עד {today.day}.{today.month}: {rep['verdict']}"]
+        if self.conv:
+            wm = self.week_minutes(ws)
+            tot = sum(wm.values())
+            lines[0] = f"📊 סיכום שבוע {ws.day}.{ws.month} עד {today.day}.{today.month}: " + (f"למדת {self.hm_text(tot)}" if tot else "לא נרשם לימוד השבוע")
+            if wm:
+                lines += ["", "📈 לימוד בפועל: " + " · ".join(f"{COURSES[c]['name']} {m} דק׳" for c, m in sorted(wm.items(), key=lambda kv: -kv[1]))]
+            gaps = SUG.open_gaps(self.st, today, uni, self.now)
+            if gaps:
+                lines.append("פערים פתוחים: " + ", ".join(sorted({COURSES[g["course"]]["name"] for g in gaps})))
         # 📈 מספרים
-        if rep["total_planned"]:
+        elif rep["total_planned"]:
             per = " · ".join(f"{n} {v['done']}/{v['planned']}" + ("" if v["done"] >= v["planned"] > 0 else "⚠️")
                              for n, v in rep["by_course"].items() if v["planned"] or v["done"])
             lines += ["", f"📈 בוצעו {rep['total_done']} מתוך {rep['total_planned']}", per]
@@ -1473,7 +1495,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
     def refresh_daily(self, mid):
         meta = self.st["bot"]["msgs"].get(str(mid), {})
         if meta.get("type") == "daily":
-            self.tg.edit_buttons(mid, self.daily_buttons(date.fromisoformat(meta["date"])))
+            self.tg.edit_buttons(mid, self.daily_buttons(date.fromisoformat(meta["date"])) + meta.get("offer", []))
 
     def add_recap(self, d: str, course: str, rating=None, topics="", unclear="", cause=""):
         cur = next((r for r in self.st["recaps"] if r["date"] == d and r["course"] == course), None)
