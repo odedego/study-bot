@@ -26,6 +26,7 @@ from datetime import date, datetime, time, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import planner as P  # noqa: E402
 from bot import semester as SEM  # noqa: E402
+from bot.conv import ConvMixin  # noqa: E402
 from bot.extras import ExtrasMixin, PlanBlocked  # noqa: E402
 from bot.lessons_cal import LessonsCalMixin  # noqa: E402
 from bot.mail import MailMixin  # noqa: E402
@@ -242,7 +243,7 @@ def parse_local(v: str) -> datetime:
     return x.replace(tzinfo=TZ) if x.tzinfo is None else x.astimezone(TZ)
 
 
-class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
+class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
     def __init__(self, tg, cal, feed, store, llm, cfg: dict, now_fn=None):
         self.tg, self.feed, self.store, self.llm = _ChatTG(tg, self), feed, store, llm
         self._approved = False
@@ -445,6 +446,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         """בוצע / לא בוצע: גם במצב וגם בכותרת האירוע ביומן."""
         s["status"] = status
         s["marked_at"] = P.iso(self.now)
+        self.log_done_session(s)
         if s.get("eventId"):
             title = strip_marks(P._session_from_state(s).title())
             prefix = {"done": "✅ ", "missed": "❌ "}.get(status, "")
@@ -908,6 +910,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         text = (f"🚆 ריקאפ · {dd(today)}\n{names}\n\nקודם: היית בשיעור?\n"
                 "אחרי \"הייתי\" יופיע דירוג הבנה (1 = לא הבנתי, 5 = שולט). "
                 "אפשר גם לכתוב חופשי: מה נלמד, מה לא ברור, מטלות חדשות.")
+        if self.conv:
+            self.rq_open(today.isoformat(), courses)
         mid = self.tg.send(text, self.recap_buttons(today, courses))
         self.st["bot"]["msgs"][str(mid)] = {"type": "recap", "date": today.isoformat(), "courses": courses}
         self.st["bot"]["pending"] = {"type": "recap", "date": today.isoformat(), "courses": courses,
@@ -943,6 +947,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         return rows
 
     def job_daily(self, today: date):
+        if self.conv:
+            self.rq_close()      # שאלות ריקאפ שלא נענו עד 21:30 פגות בשקט
         uni, _ = self.load_uni()
         personal = self.load_personal(P.week_start(today))
         rd = P.review_data(today, uni, personal, self.st)
@@ -1338,6 +1344,12 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [c])))
             if note:
                 self.tg.send(note)
+            if self.conv:
+                self.rq_on_rating(d, c, int(n))
+        elif kind == "rqa":
+            reply = self.on_rq_callback(parts)
+        elif kind == "sa":
+            reply = self.on_sa_callback(parts, mid)
         elif kind == "rateall":
             d = parts[1]
             meta = self.st["bot"]["msgs"].get(str(mid), {})
@@ -1348,6 +1360,8 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
                     self.add_recap(d, c, rating=5)
             reply = "נרשם. יום טוב!"
             self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [])))
+            if self.conv:
+                self.rq_on_rating(d, "", 5, quick=True)
         elif kind == "s":
             _, act, short = parts
             s = self.by_short(short)
@@ -1390,10 +1404,12 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             meta = self.st["bot"]["msgs"].get(str(mid), {})
             if meta.get("type") == "recap":
                 self.tg.edit_buttons(mid, self.recap_buttons(date.fromisoformat(d), meta.get("courses", [c])))
-            if v == "absent":
+            if v == "absent" and not self.conv:
                 note = self.propose_makeup(c, d)
                 if note:
                     self.tg.send(note)
+            if self.conv and meta.get("type") == "recap":
+                self.deferred(lambda: self.rq_check_final(d))
         elif kind == "attall":
             d = parts[1]
             meta = self.st["bot"]["msgs"].get(str(mid), {})
@@ -1459,7 +1475,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         if meta.get("type") == "daily":
             self.tg.edit_buttons(mid, self.daily_buttons(date.fromisoformat(meta["date"])))
 
-    def add_recap(self, d: str, course: str, rating=None, topics="", unclear=""):
+    def add_recap(self, d: str, course: str, rating=None, topics="", unclear="", cause=""):
         cur = next((r for r in self.st["recaps"] if r["date"] == d and r["course"] == course), None)
         if not cur:
             cur = {"date": d, "course": course, "rating": None, "topics": "", "unclear": "", "at": P.iso(self.now)}
@@ -1470,6 +1486,10 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             cur["topics"] = (cur["topics"] + "; " if cur["topics"] else "") + topics
         if unclear:
             cur["unclear"] = (cur["unclear"] + "; " if cur["unclear"] else "") + unclear
+        if cause:
+            cur["cause"] = (cur.get("cause", "") + "; " if cur.get("cause") else "") + cause
+        if self.conv:
+            return ""         # בשיחה: ההמלצה לחיזוק מגיעה בשאלה "מתי נוח לך ללמוד", לא כהצעת שיבוץ אוטומטית
         if cur.get("rating") is not None and cur["rating"] <= 2:
             return self.maybe_reinforce(course, d, cur["rating"], cur.get("unclear", ""))
         return ""
@@ -1620,6 +1640,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
         return json.dumps({"now": P.iso(self.now), "today": f"{HEB_DAY[today.weekday()]} {today.isoformat()}",
                            "courses": {k: v["name"] for k, v in COURSES.items()},
                            "sessions": sess, "lessons": lessons, "recap_context": pend,
+                           "recap_question": self.rq_for_llm(),
                            "personal_events": self.personal_for_llm(),
                            "pending_proposals": self.pending_for_llm(),
                            "exams_moed_a": [{"course": c, "at": P.iso(dt), "days_left": n} for c, dt, n in SEM.upcoming_exams(today)],
@@ -1872,8 +1893,14 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
             d = a.get("date") or self.now.date().isoformat()
             rating = a.get("rating")
             rating = int(rating) if rating not in (None, "") and 1 <= int(rating) <= 5 else None
-            note = self.add_recap(d, c, rating, a.get("topics", ""), a.get("unclear", ""))
+            note = self.add_recap(d, c, rating, a.get("topics", ""), a.get("unclear", ""), a.get("cause", ""))
+            if self.conv:
+                self.rq_text_progress(d, c, a.get("topics", ""), a.get("unclear", ""), a.get("cause", ""))
             return f"📝 ריקאפ {COURSES[c]['name']} נשמר" + (f"\n{note}" if note else "")
+        if act == "study_at":
+            return self.study_at_action(a)
+        if act == "studied":
+            return self.studied_action(a)
         if act == "assignment":
             c = a.get("course")
             if c not in COURSES:
@@ -2370,6 +2397,7 @@ class Bot(ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
 
 FREEZE_RULES = ("כרגע הבוט לא משבץ ולא מזיז סשני למידה לבד. עודד קובע בעצמו מתי ללמוד, והבוט מציע ומתעד רק לבקשתו ובאישורו. "
                 "סשנים שכבר ביומן נשארים כמו שהם. אל תבטיח שיבוץ מחדש, שיבוץ אוטומטי או הזזת עודף. "
+                "הבוט מציע ושואל, ועודד מחליט מתי ללמוד (study_at). אורך סשן גמיש, לא חייב 50 דקות. "
                 "כללים שנשארים: בלי שבת, שישי עד 16:00, אף פעם אחרי 23:00. יום חמישי: פנוי ללמוד עד 13:45 (תחילת השיעורים).")
 
 PLANNING_RULES = ("אחרי כל שיעור הבוט משבץ חזרה (סשן של 50 דקות) בימים הקרובים, לפי יעד סשנים שבועי לכל קורס (weekly_targets). "
@@ -2415,7 +2443,9 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 פעולות מותרות (השתמש רק ב-id מתוך sessions בהקשר, לעולם אל תמציא):
 {"action":"done","id":"..."}            סשן בוצע
 {"action":"missed","id":"..."}          סשן לא בוצע
-{"action":"recap","course":"math|intro|econ|stats|excel|law|mgmt","date":"YYYY-MM-DD","rating":1-5 או null,"topics":"מה נלמד","unclear":"מה לא ברור"}
+{"action":"recap","course":"math|intro|econ|stats|excel|law|mgmt","date":"YYYY-MM-DD","rating":1-5 או null,"topics":"מה נלמד","unclear":"מה לא ברור","cause":"מה הפריע (קצב, הסבר, רקע, ריכוז)"}
+{"action":"study_at","course":"...","start":"YYYY-MM-DDTHH:MM","minutes":מספר או null}   עודד קבע מתי ללמוד: הבוט קובע ביומן. אורך לא נאמר = null
+{"action":"studied","course":"...","date":"YYYY-MM-DD","minutes":מספר או null,"topic":"מה למד"}   עודד אמר שלמד (גם בלי סשן ביומן)
 {"action":"assignment","course":"...","title":"...","due":"YYYY-MM-DD או null","est_min":מספר או null}
 {"action":"assignment_done","id":"..."}
 {"action":"move","id":"...","start":"YYYY-MM-DDTHH:MM","late_ok":false}   late_ok=true רק אם עודד ביקש במפורש ללמוד אחרי 23:00
@@ -2470,6 +2500,9 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
   cancel_proposal להצעה הישנה ו-personal חדש.
 - personal עם op=create: תמלא תמיד end. אם לא נאמרה שעת סיום: חתונה, בר/בת מצווה, אירוע ערב או מסיבה = 4 שעות;
   ארוחה = שעתיים; פגישה, תור או סידור = שעה. ב-reply כתוב ששעת הסיום משוערת. בלי שעת התחלה בכלל (רק "בערב") = שאל באיזו שעה.
+- אם recap_question פעיל ועודד עונה עליו בטקסט: recap לאותו קורס ותאריך. kind=topics: מלא topics. kind=unclear: מלא unclear.
+  kind=cause: מלא cause. אל תמלא שדה שלא נשאל עליו. אם הוא מבקש לדלג, אל תיצור פעולה ואמור שדילגת.
+- "אני לומד ב-17:00 חצי שעה מתמטיקה" = study_at (לא extra). "למדתי היום שעה סטטיסטיקה" = studied.
 - אם recap_context פעיל ועודד מתאר שיעורים, צור recap לכל קורס שהזכיר, בתאריך של recap_context.
 - תאריכים יחסיים ("מחר", "ביום רביעי") מחשבים מ-now. "הסופ"ש" = שישי ושבת. "הסופ"ש הבא" = שישי ושבת של השבוע הבא.
 - "אחרי הלימודים ביום X" = שעת ההתחלה היא שעת הסיום של השיעור האחרון באותו יום (last_lesson_end). אם ליום הזה אין נתון
