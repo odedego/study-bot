@@ -1202,6 +1202,8 @@ def weak_data(st: dict, today: date, days: int = 14) -> list[dict]:
             x["score"] += 4 - rt
             x["ratings"].append(rt)
             t = (r.get("unclear") or r.get("topics") or "").strip()
+            if r.get("cause"):
+                t = (t + " · " if t else "") + "הפריע: " + r["cause"]
             if t:
                 x["topics"].append(t)
     done = {s["key"] for s in st.get("sessions", []) if s.get("status") == "done"}
