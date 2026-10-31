@@ -33,6 +33,7 @@ from bot.extras import ExtrasMixin, PlanBlocked  # noqa: E402
 from bot.lessons_cal import LessonsCalMixin  # noqa: E402
 from bot.mail import MailMixin  # noqa: E402
 from bot.marathon import MarathonMixin  # noqa: E402
+from bot.report import ReportMixin  # noqa: E402
 from bot.tasks import TASK_ACTIONS, TasksMixin  # noqa: E402
 
 TZ = P.TZ
@@ -245,7 +246,7 @@ def parse_local(v: str) -> datetime:
     return x.replace(tzinfo=TZ) if x.tzinfo is None else x.astimezone(TZ)
 
 
-class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, TasksMixin):
+class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, ReportMixin, TasksMixin):
     def __init__(self, tg, cal, feed, store, llm, cfg: dict, now_fn=None):
         self.tg, self.feed, self.store, self.llm = _ChatTG(tg, self), feed, store, llm
         self._approved = False
@@ -1073,6 +1074,8 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Tas
         nxt = today + timedelta(days=1)
         buttons = []
         rep, lines = self.week_summary(ws, today, uni)
+        if self.conv and self.send_weekly_pdf(ws, today, uni, rep, lines[0]):
+            lines = [lines[0], "", "📎 הדוח המלא (כיסוי חומר, נושאים חלשים, גרפים) מצורף כ-PDF."]
         # 🗓 השבוע הבא
         lines += ["", "🗓 השבוע הבא:"]
         up = SEM.upcoming_exams(today)

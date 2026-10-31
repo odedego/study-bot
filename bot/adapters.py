@@ -104,6 +104,18 @@ class Telegram:
             p["reply_markup"] = m
         return self._call("sendMessage", **p)["message_id"]
 
+    def send_document(self, filename: str, data: bytes, caption: str = "", chat_id: str | None = None) -> int:
+        """שולח קובץ (למשל PDF). multipart, לכן לא עובר דרך _call."""
+        def go():
+            try:
+                r = requests.post(f"{self.base}/sendDocument", data={"chat_id": chat_id or self.chat_id, "caption": caption[:1000]},
+                                  files={"document": (filename, data, "application/pdf")}, timeout=TIMEOUT + 30)
+            except requests.RequestException as e:
+                raise self._safe(e) from None
+            _check(r, "telegram sendDocument")
+            return r.json()["result"]["message_id"]
+        return _retry(go)
+
     def edit(self, message_id: int, text: str, buttons=None):
         p = {"chat_id": self.chat_id, "message_id": message_id, "text": text[:4000]}
         m = self._markup(buttons)
