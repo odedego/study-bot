@@ -13,8 +13,10 @@ import html
 import os
 
 FONT = os.path.join(os.path.dirname(__file__), "fonts", "Heebo.ttf")
-PALETTE = ["#2563EB", "#0D9488", "#D97706", "#7C3AED", "#DB2777", "#4B5563", "#65A30D"]
-GREEN, AMBER, GREY, RED = "#16A34A", "#F59E0B", "#E5E7EB", "#DC2626"
+# ערכת נושא כהה: רקע כמעט שחור, כרטיסים מעוגלים עם מסגרת עדינה, אקצנט ירוק
+BG, CARD, LINE, TEXT, MUTED = "#0B0D11", "#14171C", "#262A31", "#F3F4F6", "#8B93A1"
+PALETTE = ["#4F8CFF", "#2DD4BF", "#FBBF24", "#A78BFA", "#F472B6", "#94A3B8", "#A3E635"]
+GREEN, AMBER, GREY, RED = "#22C55E", "#F59E0B", "#2B2F36", "#F87171"
 
 
 def _e(x) -> str:
@@ -74,32 +76,32 @@ def _cards(data: dict) -> str:
 def build_html(data: dict) -> str:
     css = f"""
 @font-face {{ font-family: Heebo; src: url('file://{FONT}'); font-weight: 100 900; }}
-@page {{ size: A4; margin: 16mm 14mm 16mm 14mm; @bottom-center {{ content: counter(page) " / " counter(pages); font: 9pt Heebo; color: #9CA3AF; direction: ltr; unicode-bidi: bidi-override; }} }}
-html {{ direction: rtl; font-family: Heebo, sans-serif; color: #111827; font-size: 11pt; line-height: 1.45; }}
-h1 {{ font-size: 24pt; font-weight: 800; margin: 0 0 2pt; }}
-h2 {{ font-size: 14pt; font-weight: 700; margin: 18pt 0 6pt; padding-bottom: 3pt; border-bottom: 2px solid #E5E7EB; }}
-.range {{ color: #6B7280; font-size: 11pt; }}
-.verdict {{ margin: 8pt 0 12pt; font-size: 12pt; }}
+@page {{ size: A4; margin: 16mm 14mm 16mm 14mm; background: {BG}; @bottom-center {{ content: counter(page) " / " counter(pages); font: 9pt Heebo; color: #5B6270; direction: ltr; unicode-bidi: bidi-override; }} }}
+html {{ direction: rtl; font-family: Heebo, sans-serif; color: {TEXT}; background: {BG}; font-size: 11pt; line-height: 1.45; }}
+h1 {{ font-size: 25pt; font-weight: 800; margin: 0 0 2pt; color: #FFFFFF; }}
+h2 {{ font-size: 14pt; font-weight: 700; margin: 20pt 0 8pt; padding-bottom: 4pt; border-bottom: 1px solid {LINE}; color: #FFFFFF; }}
+.range {{ color: {MUTED}; font-size: 11pt; }}
+.verdict {{ margin: 10pt 0 12pt; font-size: 12pt; background: {CARD}; border: 1px solid {LINE}; border-radius: 12pt; padding: 8pt 12pt; }}
 .cards {{ display: flex; gap: 8pt; }}
-.card {{ flex: 1; background: #F3F4F6; border-radius: 10pt; padding: 9pt 10pt; }}
-.card .k {{ color: #6B7280; font-size: 9pt; }} .card .v {{ font-size: 20pt; font-weight: 800; }}
-.sub {{ font-size: 8.5pt; color: #6B7280; }} .up {{ color: {GREEN}; }} .down {{ color: {RED}; }}
-.course {{ margin: 8pt 0 10pt; page-break-inside: avoid; }}
+.card {{ flex: 1; background: {CARD}; border: 1px solid {LINE}; border-radius: 12pt; padding: 9pt 11pt; }}
+.card .k {{ color: {MUTED}; font-size: 9pt; }} .card .v {{ font-size: 21pt; font-weight: 800; color: #FFFFFF; }}
+.sub {{ font-size: 8.5pt; color: {MUTED}; }} .up {{ color: {GREEN}; }} .down {{ color: {RED}; }}
+.course {{ margin: 8pt 0 10pt; page-break-inside: avoid; background: {CARD}; border: 1px solid {LINE}; border-radius: 12pt; padding: 8pt 11pt 9pt; }}
 .course .name {{ font-weight: 700; font-size: 11.5pt; display: flex; justify-content: space-between; }}
-.course .meta {{ font-size: 9pt; color: #6B7280; }}
-.legend span {{ display: inline-block; margin-left: 10pt; font-size: 9pt; color: #4B5563; }}
+.course .meta {{ font-size: 9pt; color: {MUTED}; font-weight: 400; }}
+.legend span {{ display: inline-block; margin-left: 10pt; font-size: 9pt; color: {MUTED}; }}
 .dot {{ display: inline-block; width: 8pt; height: 8pt; border-radius: 4pt; margin-left: 3pt; }}
-.weak {{ border-right: 4px solid {RED}; background: #FEF2F2; padding: 5pt 8pt; margin: 4pt 0; border-radius: 6pt; page-break-inside: avoid; }}
-.weak b {{ color: #991B1B; }} .weak .why {{ font-size: 9.5pt; color: #4B5563; }}
-.exam {{ display: inline-block; background: #EFF6FF; border-radius: 10pt; padding: 6pt 10pt; margin: 0 0 6pt 6pt; }}
-.exam .d {{ font-size: 17pt; font-weight: 800; color: #1D4ED8; }}
-ul {{ margin: 3pt 0; padding-right: 16pt; }} li {{ margin: 2pt 0; }}
-.muted {{ color: #9CA3AF; }}
-.bar {{ display: flex; height: 13pt; border-radius: 7pt; overflow: hidden; background: {GREY}; margin-top: 3pt; }} .bar i {{ display: block; height: 100%; }}
-.mrow {{ display: flex; align-items: center; margin: 5pt 0; }} .ml {{ width: 70pt; font-weight: 600; }}
-.track {{ position: relative; flex: 1; height: 14pt; }} .track i {{ position: absolute; right: 0; top: 0; height: 14pt; border-radius: 5pt; }}
-.prev {{ position: absolute; top: -3pt; width: 0; height: 20pt; border-right: 2px dashed #111827; }}
-.mv {{ width: 52pt; text-align: left; font-size: 9.5pt; color: #4B5563; direction: ltr; }}
+.weak {{ border: 1px solid #3A2226; border-right: 4px solid {RED}; background: #1A1215; padding: 6pt 10pt; margin: 5pt 0; border-radius: 10pt; page-break-inside: avoid; }}
+.weak b {{ color: {RED}; }} .weak .why {{ font-size: 9.5pt; color: {MUTED}; }}
+.exam {{ display: inline-block; background: {CARD}; border: 1px solid {LINE}; border-radius: 12pt; padding: 7pt 12pt; margin: 0 0 6pt 6pt; }}
+.exam .d {{ font-size: 18pt; font-weight: 800; color: {GREEN}; }}
+ul {{ margin: 3pt 0; padding-right: 16pt; }} li {{ margin: 3pt 0; }}
+.muted {{ color: {MUTED}; }}
+.bar {{ display: flex; height: 13pt; border-radius: 7pt; overflow: hidden; background: {GREY}; margin-top: 5pt; }} .bar i {{ display: block; height: 100%; }}
+.mrow {{ display: flex; align-items: center; margin: 6pt 0; }} .ml {{ width: 70pt; font-weight: 600; }}
+.track {{ position: relative; flex: 1; height: 14pt; background: #181B21; border-radius: 5pt; }} .track i {{ position: absolute; right: 0; top: 0; height: 14pt; border-radius: 5pt; }}
+.prev {{ position: absolute; top: -3pt; width: 0; height: 20pt; border-right: 2px dashed #E5E7EB; }}
+.mv {{ width: 52pt; text-align: left; font-size: 9.5pt; color: {MUTED}; direction: ltr; }}
 """
     body = [f'<h1>{_e(data["title"])}</h1><div class="range">{_e(data.get("range", ""))}</div>',
             f'<div class="verdict">{_e(data.get("verdict", ""))}</div>', _cards(data)]
@@ -107,7 +109,7 @@ ul {{ margin: 3pt 0; padding-right: 16pt; }} li {{ margin: 2pt 0; }}
                 '<div class="sub">הקו המקווקו = השבוע הקודם</div>')
     body.append('<h2>כיסוי חומר</h2><div class="legend"><span><i class="dot" style="background:%s"></i>נחזר</span>'
                 '<span><i class="dot" style="background:%s"></i>נלמד, עוד לא נחזר</span>'
-                '<span><i class="dot" style="background:#D1D5DB"></i>עוד לא נלמד</span></div>' % (GREEN, AMBER))
+                '<span><i class="dot" style="background:#3A3F47"></i>עוד לא נלמד</span></div>' % (GREEN, AMBER))
     for c in data["courses"]:
         extra = f' · {len(c["pending"])} ממתינים לחזרה' if c.get("pending") else ""
         body.append(f'<div class="course"><div class="name"><span>{_e(c["name"])}</span>'
