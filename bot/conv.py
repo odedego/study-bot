@@ -231,6 +231,11 @@ class ConvMixin:
         r = self.rq(ds)
         if not r or r["closed"] or r["final"] or not self.rq_resolved(ds, r):
             return
+        if r.get("backfill"):          # השלמת ריקאפ משיעור ישן: אין שאלת "מתי נוח ללמוד היום"
+            r["final"] = True
+            self.rq_close(ds)
+            self.tg.send("✅ הריקאפ נשמר.")
+            return
         self.rq_final(ds)
         r["final"] = True
 
@@ -536,3 +541,72 @@ class ConvMixin:
             msg += f" {len(failed)} לא נמחקו מהיומן (שגיאה), בדוק ידנית."
         self.tg.send(msg + "\nמעכשיו אני שואל ומציע, ואתה קובע. סימנתי אותם \"הוסר\" ולא ייספרו כהחמצה.")
         return "בוצע"
+
+    # ------------------------------------------------------------ ריקאפים שמורים וחסרים
+    def recaps_for_llm(self) -> list[dict]:
+        """הריקאפים השמורים (60 יום אחרונים, עד 30), כדי ש-Claude יוכל לענות מה נרשם."""
+        lo = (self.now.date() - timedelta(days=60)).isoformat()
+        rows = [r for r in self.st.get("recaps", []) if r.get("date", "") >= lo and r.get("course") in COURSES]
+        rows.sort(key=lambda r: (r["date"], P.COURSE_ORDER.index(r["course"])), reverse=True)
+        out = []
+        for r in rows[:30]:
+            x = {"date": r["date"], "course": r["course"], "att": self.st["bot"]["attend"].get(f"{r['course']}|{r['date']}")}
+            if r.get("rating") is not None:
+                x["rating"] = r["rating"]
+            for k, n in (("topics", 90), ("unclear", 70), ("cause", 40)):
+                if (r.get(k) or "").strip():
+                    x[k] = r[k].strip()[:n]
+            out.append(x)
+        return out
+
+    def missing_list(self, uni=None) -> list[dict]:
+        uni = uni or self.load_uni()[0]
+        return SUG.missing_recaps(self.st, self.now.date(), uni, self.now)
+
+    def missing_for_llm(self, uni) -> list[dict]:
+        return self.missing_list(uni)[-25:]
+
+    def recaps_overview(self):
+        miss = self.missing_list()
+        lines = ["📝 ריקאפים"]
+        if miss:
+            lines += ["", f"חסרים {len(miss)} (מהחדש לישן):"]
+            for m in sorted(miss, key=lambda x: x["date"], reverse=True)[:14]:
+                d = date.fromisoformat(m["date"])
+                lines.append(f"• {COURSES[m['course']]['name']} · {_dd(d)}")
+            if len(miss) > 14:
+                lines.append(f"ועוד {len(miss) - 14} ישנים יותר")
+        else:
+            lines += ["", "אין ריקאפים חסרים 👌"]
+        saved = self.recaps_for_llm()[:5]
+        if saved:
+            lines += ["", f"נשמרו {len(self.st['recaps'])}. האחרונים:"]
+            for r in saved:
+                d = date.fromisoformat(r["date"])
+                bit = (f" · הבנה {r['rating']}/5" if r.get("rating") else "") + (f" · {r['topics'][:45]}" if r.get("topics") else "")
+                lines.append(f"• {COURSES[r['course']]['name']} {d.day}.{d.month}{bit}")
+        if miss:
+            lines += ["", "לחץ על שיעור להשלמה, או כתוב חופשי מה זכור לך (למשל \"במתמטיקה ב-2.11 למדנו נגזרות, הבנתי 3\")."]
+        rows = [[(f"השלם: {COURSES[m['course']]['name'][:10]} {date.fromisoformat(m['date']).day}.{date.fromisoformat(m['date']).month}",
+                  f"rcb|{m['course']}|{m['date']}")] for m in sorted(miss, key=lambda x: x["date"], reverse=True)[:8]]
+        self.tg.send("\n".join(lines), rows or None)
+
+    def backfill_recap(self, c: str, ds: str) -> str:
+        """כפתור "השלם": כרטיס ריקאפ (נוכחות והבנה, ואז השאלות) לשיעור ישן. לא דורס שיחת ריקאפ פעילה של יום אחר."""
+        if c not in COURSES:
+            return "קורס לא ידוע"
+        d = date.fromisoformat(ds)
+        r = self.rq()
+        if not self.conv:
+            return "זמין במצב הרגיל בלבד"
+        if r and not r["closed"] and r["date"] != ds:
+            self.tg.send(f"יש ריקאפ פתוח של {_dd(date.fromisoformat(r['date']))}. אפשר לסיים אותו קודם, או לכתוב לי חופשי מה זכור לך מהשיעור הזה ואשייך לפי התאריך.")
+            self.st["bot"]["pending"] = {"type": "recap", "date": ds, "courses": [c], "until": P.iso(self.now + timedelta(hours=8))}
+            return ""
+        self.rq_open(ds, [c])
+        self.st["bot"]["rq"]["backfill"] = ds != self.now.date().isoformat()
+        text = f"🚆 ריקאפ לשיעור שעבר · {_dd(d)}\n{COURSES[c]['name']}\n\nהיית בשיעור?"
+        mid = self.tg.send(text, self.recap_buttons(d, [c]))
+        self.st["bot"]["msgs"][str(mid)] = {"type": "recap", "date": ds, "courses": [c]}
+        self.st["bot"]["pending"] = {"type": "recap", "date": ds, "courses": [c], "until": P.iso(self.now + timedelta(hours=8))}
+        return ""

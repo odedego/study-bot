@@ -77,6 +77,29 @@ def open_gaps(st: dict, today: date, uni: P.Uni, now: datetime) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------------ ריקאפים חסרים
+RECAP_LOOKBACK_DAYS = 60
+
+
+def missing_recaps(st: dict, today: date, uni: P.Uni, now: datetime) -> list[dict]:
+    """שיעורים שהסתיימו, שהייתי בהם (או שלא נענתה נוכחות) ואין להם ריקאפ. היעדרות ומילואים אינם חסרים. מהישן לחדש."""
+    lo = max(SEM.SEMESTER_START, today - timedelta(days=RECAP_LOOKBACK_DAYS))
+    have = {(r.get("course"), r.get("date")) for r in st.get("recaps", [])}
+    attend = st.get("bot", {}).get("attend", {})
+    out, seen = [], set()
+    for l in sorted(uni.lessons, key=lambda x: x.start):
+        if l.course not in P.COURSES or not (lo <= l.day <= today) or l.end > now:
+            continue
+        key = (l.course, l.day.isoformat())
+        if key in seen or key in have:
+            continue
+        seen.add(key)
+        att = attend.get(f"{l.course}|{l.day.isoformat()}")
+        if att in (None, "present"):
+            out.append({"course": l.course, "date": l.day.isoformat(), "attend": att})
+    return out
+
+
 # ------------------------------------------------------------------ המלצות
 def recommend(st: dict, today: date, uni: P.Uni, now: datetime, limit: int = 2) -> list[dict]:
     """ציון לכל קורס. רק קורסים עם ציון חיובי. מקסימום limit."""
