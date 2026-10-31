@@ -352,6 +352,8 @@ class MarathonMixin:
     def mar_set_need(self, c: str, n) -> str:
         if c not in COURSES:
             raise ValueError("קורס לא מוכר")
+        if self.conv:
+            return self.mar_set_need_conv(c, n)
         self.mar()["need"][c] = max(0, min(80, int(n)))
         return f"🏃 {COURSES[c]['name']}: {self.mar_need(c)} סשנים במרתון."
 

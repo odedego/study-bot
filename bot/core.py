@@ -821,7 +821,9 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Mar
             lines += [""] + mlines
         if self.conv:
             try:
-                buttons += self.m2_today(today)[1]
+                mrows = self.m2_today(today)[1]
+                if mrows and self._defer is not None:       # הכפתורים בהודעה נפרדת: לחיצה עליהם לא נוגעת בכפתורי הבוקר
+                    self._defer.append(lambda r=mrows: self.tg.send("🏃 מתי נוח לך ללמוד היום? (ההצעה מהמרתון)", r))
             except Exception as e:  # noqa: BLE001
                 self.log.append(f"m2 morning: {type(e).__name__}: {str(e)[:100]}")
         today_courses = {l.course for l in uni.lessons if l.day == today}
@@ -2120,11 +2122,15 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Mar
         if act == "marathon_unblock":
             return self.mar_unblock(a.get("from") or a.get("date"), a.get("to"))
         if act == "marathon_need":
-            if a.get("hours") not in (None, "") and self.conv:
-                return self.mar_set_hours(a.get("course"), a.get("hours"))
+            if a.get("hours") not in (None, ""):
+                if self.conv:
+                    return self.mar_set_hours(a.get("course"), a.get("hours"))
+                return self.mar_set_need(a.get("course"), round(float(a["hours"]) * 60 / 50))     # v1: שעות → סשנים של 50 דק'
             return self.mar_set_need(a.get("course"), a.get("sessions"))
         if act == "review_sheet":
-            return self.send_review_sheet(a.get("course") if a.get("course") in COURSES else None)
+            only = a.get("course") if a.get("course") in COURSES else None
+            res = self.send_review_sheet(only)
+            return res or ("" if only or not a.get("course") else "לא זיהיתי את הקורס, שלחתי דף לכל הקורסים.")
         if act == "marathon_start":
             return self.mar_set_start(a.get("date"))
         raise ValueError("פעולה לא מוכרת")

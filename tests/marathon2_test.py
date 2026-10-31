@@ -121,6 +121,29 @@ def main():
     check(wd["marathon"] and all({"readiness", "remaining", "days"} <= set(x) for x in wd["marathon"]), "מוכנות למבחנים בדוח השבועי")
     from bot.report_pdf import build_html
     check("מוכנות למבחנים" in build_html(wd), "מופיעה ב-PDF")
+    print("== תיקוני סקירה ==")
+    e2, b2 = fresh()
+    d = b2.now.date() + timedelta(days=3)
+    uni2, _ = b2.load_uni()
+    pers2 = b2.load_personal(P.week_start(d))
+    from bot import suggest as SUG
+    ch = SUG.free_chunks(d, uni2, pers2, b2.st, b2.now, cap_min=350, max_n=6)
+    tot = sum((y - x).total_seconds() / 60 for x, y in ch)
+    check(tot <= 350 and all((y - x).total_seconds() / 60 <= 120 for x, y in ch), "free_chunks: חתיכות עד שעתיים ותקרה יומית")
+    check(all(ch[i][1] < ch[i + 1][0] for i in range(len(ch) - 1)), "free_chunks: חלונות לא חופפים, עם הפסקה")
+    m0 = b2.m2_left("math")
+    b2.st.setdefault("sessions", []).append({"course": "math", "status": "planned", "start": (b2.now + timedelta(days=1)).isoformat(),
+                                             "end": (b2.now + timedelta(days=1, minutes=100)).isoformat()})
+    check(abs(b2.m2_left("math") - (m0 - 100)) < 1, "סשן שנקבע מופחת מהנותר")
+    b2.st.setdefault("log", []).append({"course": "math", "min": 50, "date": b2.mar()["start"]})
+    check(abs(b2.m2_left("math") - (m0 - 100 - 30)) < 1, "לימוד שנרשם מופחת (60%)")
+    b2._personal_error = "x"
+    check("לא הצלחתי לקרוא את היומן האישי" in b2.m2_text(), "שגיאת יומן אישי מוצגת בטקסט")
+    b2._personal_error = None
+    b2.apply_action({"action": "marathon_need", "course": "law", "hours": 5})
+    check(b2.mar()["need_min"].get("law") == 300, "marathon_need בשעות במצב שיחה")
+    r = b2.apply_action({"action": "review_sheet", "course": "לא-קיים"})
+    check(r and "לא זיהיתי" in str(r), "דף חזרה עם קורס לא מוכר: הודעה")
     print("\n" + ("הכול עבר" if not FAILS else f"{len(FAILS)} כשלים"))
     return 1 if FAILS else 0
 
