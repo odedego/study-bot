@@ -127,6 +127,15 @@ def build_html(data: dict) -> str:
             body.append(f'<div class="weak"><b>{_e(cn)}</b> · {_e(w["topic"])} · הבנה {w.get("rating", "?")}/5{why}</div>')
     else:
         body.append('<p class="muted">אין נושאים חלשים פתוחים. כל הכבוד.</p>')
+    if data.get("marathon"):
+        body.append("<h2>מוכנות למבחנים</h2>")
+        for x in data["marathon"]:
+            col = GREEN if x["readiness"] >= 70 else AMBER if x["readiness"] >= 40 else RED
+            deficit = f' · <b style="color:{RED}">חסר {_e(x["deficit"])}</b>' if x.get("deficit") else ""
+            body.append(f'<div class="course"><div class="name"><span>{_e(x["name"])} · מבחן {_e(x["exam"])} (בעוד {x["days"]} ימים)</span>'
+                        f'<span class="meta">נותר ~{_e(x["remaining"])}{deficit}</span></div>'
+                        f'<div class="bar"><i style="width:{max(x["readiness"], 1)}%;background:{col}"></i></div>'
+                        f'<div class="sub">מוכנות {x["readiness"]}% (הערכה לפי מפת החומר)</div></div>')
     if data.get("open_unclear"):
         body.append("<h2>נקודות לא ברורות פתוחות</h2>")
         for x in data["open_unclear"][:8]:
@@ -193,3 +202,32 @@ def build_prep_html(data: dict) -> str:
 def build_prep_pdf(data: dict) -> bytes:
     from weasyprint import HTML
     return HTML(string=build_prep_html(data), base_url=os.path.dirname(__file__)).write_pdf()
+
+
+def build_review_html(data: dict) -> str:
+    """דף חזרה לפני מבחן: לכל קורס מוכנות, נושאים לפי מצב ומה שסומן "לא ברור"."""
+    extra = """
+.t { display: inline-block; border-radius: 8pt; padding: 2pt 9pt; margin: 2pt 0 2pt 5pt; font-size: 9.5pt; border: 1px solid %s; }
+.t.weak { background: #1A1215; border-color: #3A2226; color: #FCA5A5; } .t.reviewed { background: #0F2118; border-color: #1E4D32; color: #86EFAC; }
+.t.learned { background: #231C0C; border-color: #5A4310; color: #FCD34D; } .t.new { color: %s; }
+.q { margin: 4pt 0; padding: 5pt 9pt; border-right: 3px solid %s; background: %s; border-radius: 6pt; page-break-inside: avoid; }
+""" % (LINE, MUTED, AMBER, CARD)
+    body = [f'<h1>{_e(data["title"])}</h1><div class="range">{_e(data.get("range", ""))}</div>',
+            '<div class="legend"><span><i class="dot" style="background:#22C55E"></i>נחזר</span><span><i class="dot" style="background:#F59E0B"></i>נלמד, עוד לא נחזר</span>'
+            '<span><i class="dot" style="background:#F87171"></i>חלש</span><span><i class="dot" style="background:#3A3F47"></i>עוד לא נלמד</span></div>']
+    for c in data["courses"]:
+        best = f' · מבחן תרגול {c["best"]}' if c.get("best") is not None else ""
+        body.append(f'<h2>{_e(c["name"])} · מבחן {_e(c["exam"])} (בעוד {c["days"]} ימים) · מוכנות {c["readiness"]}%{best}</h2>')
+        body.append("<div>" + "".join(f'<span class="t {t["state"]}">{_e(t["name"])}' + (f' · {t["rating"]}/5' if t.get("rating") else "") + "</span>" for t in c["topics"]) + "</div>")
+        if c["unclear"]:
+            body.append("<p><b>מה סימנת כלא ברור:</b></p>")
+            for u in c["unclear"]:
+                body.append(f'<div class="q"><span class="sub">{_e(u["date"])}' + (f' · {_e(u["topic"])}' if u["topic"] else "") + f'</span><br>{_e(u["text"])}</div>')
+        else:
+            body.append('<p class="muted">אין נקודות לא ברורות שנרשמו.</p>')
+    return f'<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8"><style>{_css()}{extra}</style></head><body>{"".join(body)}</body></html>'
+
+
+def build_review_pdf(data: dict) -> bytes:
+    from weasyprint import HTML
+    return HTML(string=build_review_html(data), base_url=os.path.dirname(__file__)).write_pdf()

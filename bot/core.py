@@ -33,6 +33,7 @@ from bot.extras import ExtrasMixin, PlanBlocked  # noqa: E402
 from bot.lessons_cal import LessonsCalMixin  # noqa: E402
 from bot.mail import MailMixin  # noqa: E402
 from bot.marathon import MarathonMixin  # noqa: E402
+from bot.marathon2 import Marathon2Mixin  # noqa: E402
 from bot.prep import PrepMixin  # noqa: E402
 from bot.report import ReportMixin  # noqa: E402
 from bot.tasks import TASK_ACTIONS, TasksMixin  # noqa: E402
@@ -163,7 +164,7 @@ LLM_TOOL = {"type": "object",
 COMMANDS = {"/start", "/help", "עזרה", "/today", "היום", "/tomorrow", "מחר", "/exams", "מבחנים", "/check", "בדיקה",
             "/marathon", "מרתון", "/absences", "היעדרויות", "נוכחות", "/week", "שבוע", "/tasks", "משימות", "/why", "למה", "מה עשית", "מה הבנת",
             "/schedule", "תזמונים", "זמני הודעות", "/material", "חומר", "נושאים", "/migrate", "מעבר",
-            "/recaps", "ריקאפים", "ריקאפים חסרים"}
+            "/recaps", "ריקאפים", "ריקאפים חסרים", "/review", "דף חזרה"}
 
 
 def command_of(text: str) -> str | None:
@@ -248,7 +249,7 @@ def parse_local(v: str) -> datetime:
     return x.replace(tzinfo=TZ) if x.tzinfo is None else x.astimezone(TZ)
 
 
-class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, PrepMixin, ReportMixin, TasksMixin):
+class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Marathon2Mixin, PrepMixin, ReportMixin, TasksMixin):
     def __init__(self, tg, cal, feed, store, llm, cfg: dict, now_fn=None):
         self.tg, self.feed, self.store, self.llm = _ChatTG(tg, self), feed, store, llm
         self._approved = False
@@ -818,6 +819,13 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Pre
         mlines = self.marathon_morning()
         if mlines:
             lines += [""] + mlines
+        if self.conv:
+            try:
+                mrows = self.m2_today(today)[1]
+                if mrows and self._defer is not None:       # הכפתורים בהודעה נפרדת: לחיצה עליהם לא נוגעת בכפתורי הבוקר
+                    self._defer.append(lambda r=mrows: self.tg.send("🏃 מתי נוח לך ללמוד היום? (ההצעה מהמרתון)", r))
+            except Exception as e:  # noqa: BLE001
+                self.log.append(f"m2 morning: {type(e).__name__}: {str(e)[:100]}")
         today_courses = {l.course for l in uni.lessons if l.day == today}
         syl = self.syllabus_lines(P.week_start(today), today_courses)
         if syl:
@@ -1577,6 +1585,11 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Pre
         if cmd in ("/check", "בדיקה"):
             self.tg.send(self.health_text("🔧 בדיקת חיבורים"))
             return
+        if cmd in ("/review", "דף חזרה"):
+            msg = self.send_review_sheet()
+            if msg:
+                self.tg.send(msg)
+            return
         if cmd in ("/recaps", "ריקאפים", "ריקאפים חסרים"):
             self.recaps_overview()
             return
@@ -2109,7 +2122,15 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Pre
         if act == "marathon_unblock":
             return self.mar_unblock(a.get("from") or a.get("date"), a.get("to"))
         if act == "marathon_need":
+            if a.get("hours") not in (None, ""):
+                if self.conv:
+                    return self.mar_set_hours(a.get("course"), a.get("hours"))
+                return self.mar_set_need(a.get("course"), round(float(a["hours"]) * 60 / 50))     # v1: שעות → סשנים של 50 דק'
             return self.mar_set_need(a.get("course"), a.get("sessions"))
+        if act == "review_sheet":
+            only = a.get("course") if a.get("course") in COURSES else None
+            res = self.send_review_sheet(only)
+            return res or ("" if only or not a.get("course") else "לא זיהיתי את הקורס, שלחתי דף לכל הקורסים.")
         if act == "marathon_start":
             return self.mar_set_start(a.get("date"))
         raise ValueError("פעולה לא מוכרת")
@@ -2540,7 +2561,8 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
 {"action":"marathon_block","from":"YYYY-MM-DD","to":"YYYY-MM-DD או null","reason":"מילואים / מנוחה / ..."}
     ימים בלי לימוד בתקופת המבחנים (מרתון). גם אם המרתון עוד לא התחיל. "יום מנוחה אחרי המבחן" = marathon_block עם reason מנוחה.
 {"action":"marathon_unblock","from":"YYYY-MM-DD","to":"YYYY-MM-DD או null"}   ביטול חסימה
-{"action":"marathon_need","course":"...","sessions":מספר}   כמה סשנים קורס צריך במרתון
+{"action":"marathon_need","course":"...","hours":מספר שעות או "sessions":מספר}   כמה זמן קורס צריך במרתון (שעות כוללות; הנותר לפי מפת החומר)
+{"action":"review_sheet","course":"... או null"}   "דף חזרה": PDF לפני מבחן (נושאים, מה לא ברור, מוכנות)
 {"action":"marathon_start","date":"YYYY-MM-DD"}   הזזת תחילת המרתון
 {"action":"attendance","course":"...","date":"YYYY-MM-DD","status":"present|absent|reserve"}   נוכחות בשיעור. absent = לא הגיע. reserve = מילואים (לא נספר כהיעדרות)
 {"action":"task","title":"עד 8 מילים","due":"YYYY-MM-DD או null","est_min":מספר או null}

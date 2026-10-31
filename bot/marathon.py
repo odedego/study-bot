@@ -290,6 +290,11 @@ class MarathonMixin:
         if dropped:
             msg += f"\n🗑 עודכן: הורדתי מהיומן {len(dropped)} סשנים:\n" + "\n".join(self.drop_lines(dropped)[:8]) \
                 + (f"\n(ועוד {len(dropped) - 8})" if len(dropped) > 8 else "")
+        if self.conv:
+            plan = self.m2_plan() if self.mar_exams(after=self.now.date()) else {"left": {}}
+            if plan["left"]:
+                msg += "\n⚠️ " + self.m2_deficit_text(plan)
+            return msg
         _, short = self.mar_allocate()
         if short and date.fromisoformat(m["start"]) <= b + timedelta(days=60):
             msg += "\n⚠️ " + self.mar_short_text(short)
@@ -347,6 +352,8 @@ class MarathonMixin:
     def mar_set_need(self, c: str, n) -> str:
         if c not in COURSES:
             raise ValueError("קורס לא מוכר")
+        if self.conv:
+            return self.mar_set_need_conv(c, n)
         self.mar()["need"][c] = max(0, min(80, int(n)))
         return f"🏃 {COURSES[c]['name']}: {self.mar_need(c)} סשנים במרתון."
 
@@ -376,6 +383,8 @@ class MarathonMixin:
         return f"• {COURSES[c]['name']} ({ed.day}.{ed.month}, בעוד {days} ימים): {done}/{need}{tail}"
 
     def marathon_text(self) -> str:
+        if self.conv:
+            return self.m2_text()
         m = self.mar()
         start = date.fromisoformat(m["start"])
         today = self.now.date()
@@ -405,6 +414,8 @@ class MarathonMixin:
     def marathon_morning(self) -> list[str]:
         if not self.mar_active():
             return []
+        if self.conv:
+            return self.m2_today()[0]
         today = self.now.date()
         ex = [(c, ed) for c, ed in self.mar_exams(after=today - timedelta(days=1)) if ed >= today]
         if not ex:
@@ -422,6 +433,7 @@ class MarathonMixin:
 
     def marathon_ctx(self) -> dict:
         m = self.mar()
+        extra = self.m2_ctx() if self.conv else {}
         return {"start": m["start"], "active": self.mar_active(), "need": {c: self.mar_need(c) for c in SEM.MARATHON_NEED},
                 "done": {c: self.mar_count(c, True) for c in SEM.MARATHON_NEED}, "best_practice": {c: self.mar_best(c) for c in SEM.MARATHON_NEED},
-                "blocked": m["blocked"]}
+                "blocked": m["blocked"], **extra}

@@ -187,13 +187,13 @@ def _ceil(dt: datetime, step: int = 15) -> datetime:
     return P._round_up(dt, step)
 
 
-def free_windows(day: date, uni: P.Uni, personal: list, st: dict, now: datetime, max_n: int = 3) -> list[tuple[datetime, datetime]]:
+def _raw_gaps(day: date, uni: P.Uni, personal: list, st: dict, now: datetime):
     """חלונות פנויים ביום, באורך משתנה (25 עד 120 דקות). בלי שבת, בלי 23:00, שישי עד 16:00, בלי יום עם קיבולת 0.
     חמישי: הבוקר פנוי עד 10 דקות לפני השיעור הראשון (13:45)."""
     if day_kind(day, uni) == "closed" or day in uni.no_study_days:
-        return []
+        return None
     if st.get("capacity", {}).get(day.isoformat()) == 0:
-        return []
+        return None
     wd = day.weekday()
     start = P.at(day, P.hm(WINDOW_START))
     if day == now.date():
@@ -222,6 +222,16 @@ def free_windows(day: date, uni: P.Uni, personal: list, st: dict, now: datetime,
         t = max(t, b1)
     if t < end:
         gaps.append((t, end))
+    return gaps, end, last_start
+
+
+def free_windows(day: date, uni: P.Uni, personal: list, st: dict, now: datetime, max_n: int = 3) -> list[tuple[datetime, datetime]]:
+    """חלונות פנויים ביום, באורך משתנה (25 עד 120 דקות). בלי שבת, בלי 23:00, שישי עד 16:00, בלי יום עם קיבולת 0.
+    חמישי: הבוקר פנוי עד 10 דקות לפני השיעור הראשון (13:45)."""
+    raw = _raw_gaps(day, uni, personal, st, now)
+    if raw is None:
+        return []
+    gaps, end, last_start = raw
     cands = []
     for g0, g1 in gaps:
         w0 = _ceil(g0)
@@ -231,6 +241,35 @@ def free_windows(day: date, uni: P.Uni, personal: list, st: dict, now: datetime,
         cands.append((w0, w1))
     cands.sort(key=lambda w: -(w[1] - w[0]).total_seconds())
     return sorted(cands[:max_n])
+
+
+
+
+def free_chunks(day: date, uni: P.Uni, personal: list, st: dict, now: datetime, chunk: int = MAX_WINDOW, brk: int = 15,
+                cap_min: int | None = None, max_n: int = 6) -> list[tuple[datetime, datetime]]:
+    """כל הזמן הפנוי ביום (לא רק חלון אחד לרווח), מפוצל לחלונות של עד chunk דקות עם הפסקה ביניהם. cap_min = תקרת סך הדקות ליום."""
+    raw = _raw_gaps(day, uni, personal, st, now)
+    if raw is None:
+        return []
+    gaps, end, last_start = raw
+    out, total = [], 0
+    for g0, g1 in gaps:
+        t = _ceil(g0)
+        g1 = min(g1, end)
+        while t <= last_start and (g1 - t) >= timedelta(minutes=MIN_WINDOW):
+            w1 = min(g1, t + timedelta(minutes=chunk))
+            m = int((w1 - t).total_seconds() // 60)
+            if cap_min is not None and total + m > cap_min:
+                m = cap_min - total
+                if m < MIN_WINDOW:
+                    return out
+                w1 = t + timedelta(minutes=m)
+            out.append((t, w1))
+            total += m
+            t = _ceil(w1 + timedelta(minutes=brk))
+            if len(out) >= max_n:
+                return out
+    return out
 
 
 def evening_offer(today: date, uni: P.Uni, personal: list, st: dict, now: datetime) -> dict | None:

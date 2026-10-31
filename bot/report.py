@@ -42,11 +42,18 @@ class ReportMixin:
                 continue
             d = date.fromisoformat(r["date"])
             open_u.append({"course": COURSES[r["course"]]["name"], "date": f"{d.day}.{d.month}", "rating": r.get("rating"), "unclear": r["unclear"].strip()[:140]})
+        mar = []
+        if self.conv and self.m2_active_view(today):
+            plan = self.m2_plan()
+            from bot.marathon2 import hours as _h
+            for c, ed in plan["exams"]:
+                mar.append({"name": COURSES[c]["name"], "exam": f"{ed.day}.{ed.month}", "days": (ed - today).days, "readiness": self.m2_readiness(c),
+                            "remaining": _h(self.m2_remaining(c)), "deficit": _h(plan["left"][c]) if c in plan["left"] else ""})
         need = rep.get("recaps_needed") or 0
         return {"title": "סיכום שבוע", "range": f"{ws.day}.{ws.month} – {today.day}.{today.month}",
                 "verdict": headline.split(": ", 1)[-1], "total_min": sum(cur.values()), "prev_total_min": sum(prev.values()),
                 "recaps": (need - len(rep.get("missing_recaps", [])), need) if need else None, "courses": courses, "exams": exams,
-                "next_week": [x.lstrip("• ") for x in self.syllabus_lines(P.week_start(nxt))], "gaps": gaps, "tips": tips, "open_unclear": open_u}
+                "next_week": [x.lstrip("• ") for x in self.syllabus_lines(P.week_start(nxt))], "gaps": gaps, "tips": tips, "open_unclear": open_u, "marathon": mar}
 
     def send_weekly_pdf(self, ws: date, today: date, uni, rep: dict, headline: str) -> bool:
         """True אם ה-PDF נשלח. כל כשל (WeasyPrint חסר, גופן, רשת) מחזיר False וקוראים לתצוגת הטקסט המלאה."""

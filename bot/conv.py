@@ -432,6 +432,9 @@ class ConvMixin:
         if not o:
             return [], []
         tm = date.fromisoformat(o["date"])
+        if self.mar_active(tm):                      # בתקופת המרתון ההצעה אחת: של המרתון, בלי הצעות סותרות
+            ml, mrows = self.m2_today(tm)
+            return ([""] + ml) if ml else [], mrows
         c = self.pick_course(today, uni)
         recs = SUG.recommend(self.st, today, uni, self.now)
         head = "מחר אפשר ללמוד עד 13:45 (השיעורים מתחילים אז)." if o["kind"] == "half" else "מחר אין לימודים."
