@@ -47,6 +47,7 @@ def main():
               for r in ctx["recaps"]), "תוכן הריקאפ השמור בהקשר")
     check(len(json.dumps(ctx["recaps"], ensure_ascii=False)) < 6000, "גודל סביר")
     print("== פקודה וכפתור השלמה ==")
+    b.rq_close()          # ריקאפ היום סגור: אפשר להשלים שיעור ישן
     b.save_state()
     n = len(e["tg"].sent)
     e["tg"].user_text("ריקאפים")
@@ -79,7 +80,44 @@ def main():
     b2.backfill_recap(old["course"], old["date"])
     check(b2.st["bot"]["rq"]["date"] == today and not b2.st["bot"]["rq"]["closed"], "שיחת היום נשארת פעילה")
     check(any("יש ריקאפ פתוח" in m["text"] for m in e2["tg"].sent[n2:]), "הבוט מסביר ומציע לכתוב חופשי")
-    check(b2.st["bot"]["pending"]["date"] == old["date"], "טקסט חופשי ישויך לתאריך הישן")
+    check(b2.st["bot"].get("pending", {}).get("date") != old["date"], "ה-pending של היום לא נדרס")
+    ctx2 = json.loads(b2.context_for_llm())
+    check(any(m["date"] == old["date"] and m["course"] == old["course"] for m in ctx2["missing_recaps"]), "השיעור הישן זמין ל-Claude לשיוך לפי תאריך")
+    check(all(m["date"] < today for m in ctx2["missing_recaps"]), "שיעורי היום לא ברשימת החסרים")
+    print("== השלמות עוקבות, היעדרות, כפילות, פיד ==")
+    e3 = env()
+    b3 = bot_of(e3)
+    b3.load_state()
+    uni3, _ = b3.load_uni()
+    ms = SUG.missing_recaps(b3.st, b3.now.date(), uni3, b3.now)
+    by_day = {}
+    for m in ms:
+        by_day.setdefault(m["date"], []).append(m)
+    day = next((d for d, v in by_day.items() if len(v) >= 2), None)
+    if day:
+        c1, c2 = by_day[day][0]["course"], by_day[day][1]["course"]
+        b3.rq_close()
+        b3.backfill_recap(c1, day)
+        b3.set_attendance(c1, day, "present")
+        b3.add_recap(day, c1, rating=4)
+        b3.rq_check_final(day)
+        check(b3.st["bot"]["rq"]["closed"], "השלמה ראשונה נסגרה")
+        n3 = len(e3["tg"].sent)
+        b3.backfill_recap(c2, day)
+        check(not b3.st["bot"]["rq"]["closed"] and not b3.st["bot"]["rq"]["final"], "השלמה שנייה לאותו תאריך נפתחת מחדש")
+        check(b3.backfill_recap(c1, day) == "כבר טופל", "לחיצה חוזרת על שיעור שטופל: כבר טופל")
+        b3.set_attendance(c2, day, "absent")
+        n4 = len(e3["tg"].sent)
+        b3.rq_check_final(day)
+        check(any("לא היית" in m["text"] for m in e3["tg"].sent[n4:]) and not any("הריקאפ נשמר" in m["text"] for m in e3["tg"].sent[n4:]),
+              "לא היה בשיעור: הודעה מתאימה ולא 'נשמר'")
+    else:
+        print("  SKIP אין יום עם שני שיעורים חסרים")
+    b3._feed_error = "x"
+    check(b3.missing_for_llm(uni3) is None, "תקלת פיד: Claude מקבל null ולא רשימה ריקה")
+    n5 = len(e3["tg"].sent)
+    b3.recaps_overview()
+    check("לא הצלחתי לקרוא" in e3["tg"].sent[-1]["text"] and len(e3["tg"].sent) == n5 + 1, "תקלת פיד: אזהרה ולא 'אין חסרים'")
     print("\n" + ("הכול עבר" if not FAILS else f"{len(FAILS)} כשלים"))
     return 1 if FAILS else 0
 

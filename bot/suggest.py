@@ -82,13 +82,14 @@ RECAP_LOOKBACK_DAYS = 60
 
 
 def missing_recaps(st: dict, today: date, uni: P.Uni, now: datetime) -> list[dict]:
-    """שיעורים שהסתיימו, שהייתי בהם (או שלא נענתה נוכחות) ואין להם ריקאפ. היעדרות ומילואים אינם חסרים. מהישן לחדש."""
+    """שיעורים מימים קודמים, שהייתי בהם (או שלא נענתה נוכחות) ואין להם ריקאפ. היעדרות ומילואים אינם חסרים. מהישן לחדש."""
     lo = max(SEM.SEMESTER_START, today - timedelta(days=RECAP_LOOKBACK_DAYS))
-    have = {(r.get("course"), r.get("date")) for r in st.get("recaps", [])}
+    have = {(r.get("course"), r.get("date")) for r in st.get("recaps", [])
+            if r.get("rating") is not None or (r.get("topics") or "").strip() or (r.get("unclear") or "").strip()}
     attend = st.get("bot", {}).get("attend", {})
     out, seen = [], set()
     for l in sorted(uni.lessons, key=lambda x: x.start):
-        if l.course not in P.COURSES or not (lo <= l.day <= today) or l.end > now:
+        if l.course not in P.COURSES or not (lo <= l.day < today) or l.end > now:     # של היום: הריקאפ הרגיל של הערב
             continue
         key = (l.course, l.day.isoformat())
         if key in seen or key in have:
