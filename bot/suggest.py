@@ -141,6 +141,12 @@ def recommend(st: dict, today: date, uni: P.Uni, now: datetime, limit: int = 2) 
             if bonus:
                 per[c]["score"] += bonus
                 per[c]["why"].append(f"מבחן בעוד {n} ימים")
+    from bot import spaced as SP
+    for x in SP.due(st, today, limit=6):        # אחרי בונוסי המבחן והבוחן: חזרה מרווחת לבדה (ציון 1) לא מקבלת אותם
+        r_ = row(x["course"])
+        if not any(w.startswith("חזרה מרווחת") for w in r_["why"]):
+            r_["score"] += 1
+            r_["why"].append("חזרה מרווחת: " + SP.short(x["name"]))
     for a in st.get("assignments", []):
         if a.get("status") == "open" and a.get("course") in P.COURSES and a.get("due"):
             n = (date.fromisoformat(a["due"]) - today).days

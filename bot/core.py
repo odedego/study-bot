@@ -33,6 +33,7 @@ from bot.extras import ExtrasMixin, PlanBlocked  # noqa: E402
 from bot.lessons_cal import LessonsCalMixin  # noqa: E402
 from bot.mail import MailMixin  # noqa: E402
 from bot.marathon import MarathonMixin  # noqa: E402
+from bot.prep import PrepMixin  # noqa: E402
 from bot.report import ReportMixin  # noqa: E402
 from bot.tasks import TASK_ACTIONS, TasksMixin  # noqa: E402
 
@@ -195,7 +196,7 @@ def view_intent(text: str) -> str | None:
     return None
 
 
-SCHEDULED = ("☀️", "🌙", "📊", "🚆", "🗓 סמן", "💪 מה צריך חיזוק", "🔧", "📌 להוסיף למשימות", "📌 משימות פתוחות", "🔍 ההודעה האחרונה")
+SCHEDULED = ("☀️", "🌙", "📊", "🚆", "🗓 סמן", "💪 מה צריך חיזוק", "🔧", "📌 להוסיף למשימות", "📌 משימות פתוחות", "🔍 ההודעה האחרונה", "📚")
 
 
 def clean_title(t, n: int = 80) -> str:
@@ -247,7 +248,7 @@ def parse_local(v: str) -> datetime:
     return x.replace(tzinfo=TZ) if x.tzinfo is None else x.astimezone(TZ)
 
 
-class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, ReportMixin, TasksMixin):
+class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, PrepMixin, ReportMixin, TasksMixin):
     def __init__(self, tg, cal, feed, store, llm, cfg: dict, now_fn=None):
         self.tg, self.feed, self.store, self.llm = _ChatTG(tg, self), feed, store, llm
         self._approved = False
@@ -804,6 +805,13 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Rep
         else:
             lines.append("היום אין שיעורים ואין סשנים.")
         if self.conv:
+            try:
+                pm = self.prep_morning_lines(today, uni)
+            except Exception as e:  # noqa: BLE001
+                pm = []
+                self.log.append(f"prep morning: {type(e).__name__}: {str(e)[:100]}")
+            if pm:
+                lines += [""] + pm
             rl = self.morning_reco_line(today, uni)
             if rl:
                 lines += ["", rl]
@@ -1003,6 +1011,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Rep
         self.st["bot"]["msgs"][f"daily:{today.isoformat()}"] = {"keys": keys}
         mid = self.tg.send("\n".join(lines), (self.daily_buttons(today) + offer_rows) or None)
         self.st["bot"]["msgs"][str(mid)] = {"type": "daily", "date": today.isoformat(), "offer": offer_rows}
+        self.maybe_prep_evening(today, uni)
 
     def ask_weekend(self, today: date):
         """אין סיכום יומי בשישי, אז במוצ״ש שואלים על סשנים של שישי/שבת שלא סומנו (אחרת בבוקר הם ישובצו מחדש)."""
@@ -1133,6 +1142,7 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Rep
         mid = self.tg.send("\n".join(lines), buttons or None)
         if any(d.startswith(("tgt|", "mar|")) for row in buttons for _, d in row):
             self.st["bot"]["msgs"][str(mid)] = {"type": "weekly", "buttons": buttons}
+        self.maybe_prep_evening(today, uni)      # במוצ״ש: התזכורת לשיעורי יום ראשון (אין סיכום יומי בשבת)
 
     # ------------------------------------------------------------ הודעות קבועות: זמנים ושליחה לפי בקשה
     def job_schedule(self) -> dict:
