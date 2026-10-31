@@ -161,7 +161,8 @@ LLM_TOOL = {"type": "object",
             "required": ["actions", "reply"]}
 COMMANDS = {"/start", "/help", "עזרה", "/today", "היום", "/tomorrow", "מחר", "/exams", "מבחנים", "/check", "בדיקה",
             "/marathon", "מרתון", "/absences", "היעדרויות", "נוכחות", "/week", "שבוע", "/tasks", "משימות", "/why", "למה", "מה עשית", "מה הבנת",
-            "/schedule", "תזמונים", "זמני הודעות", "/material", "חומר", "נושאים", "/migrate", "מעבר"}
+            "/schedule", "תזמונים", "זמני הודעות", "/material", "חומר", "נושאים", "/migrate", "מעבר",
+            "/recaps", "ריקאפים", "ריקאפים חסרים"}
 
 
 def command_of(text: str) -> str | None:
@@ -1467,6 +1468,8 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Rep
             self.tg.send(reply)
         elif kind == "mig":
             reply = self.on_mig_callback(parts, mid)
+        elif kind == "rcb":
+            reply = self.backfill_recap(parts[1], parts[2])
         elif kind == "xp":
             _, act, xid = parts
             reply = self.exec_extra(xid) if act == "ok" else self.cancel_extra(xid)
@@ -1563,6 +1566,9 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Rep
             return
         if cmd in ("/check", "בדיקה"):
             self.tg.send(self.health_text("🔧 בדיקת חיבורים"))
+            return
+        if cmd in ("/recaps", "ריקאפים", "ריקאפים חסרים"):
+            self.recaps_overview()
             return
         if cmd in ("/material", "חומר", "נושאים"):
             self.tg.send(TOP.material_text(self.st, today))
@@ -1687,6 +1693,8 @@ class Bot(ConvMixin, ExtrasMixin, LessonsCalMixin, MailMixin, MarathonMixin, Rep
                            "courses": {k: v["name"] for k, v in COURSES.items()},
                            "sessions": sess, "lessons": lessons, "recap_context": pend,
                            "recap_question": self.rq_for_llm(),
+                           "recaps": self.recaps_for_llm(),
+                           "missing_recaps": self.missing_for_llm(uni),
                            "material": self.material_for_llm(),
                            "personal_events": self.personal_for_llm(),
                            "pending_proposals": self.pending_for_llm(),
@@ -2562,6 +2570,7 @@ LLM_SYSTEM = """אתה מנוע הפענוח של בוט לימודים לסטו
   cancel_proposal להצעה הישנה ו-personal חדש.
 - personal עם op=create: תמלא תמיד end. אם לא נאמרה שעת סיום: חתונה, בר/בת מצווה, אירוע ערב או מסיבה = 4 שעות;
   ארוחה = שעתיים; פגישה, תור או סידור = שעה. ב-reply כתוב ששעת הסיום משוערת. בלי שעת התחלה בכלל (רק "בערב") = שאל באיזו שעה.
+- recaps = הריקאפים השמורים (מה נלמד, דירוג, מה לא היה ברור). missing_recaps = שיעורים שהיה בהם (או שלא נענתה נוכחות) ואין להם ריקאפ. כששואלים על ריקאפים שחסרים או על מה נרשם: עונים מהם בלבד ובקצרה, לא ממציאים, ומציעים לכתוב "ריקאפים" לכפתורי השלמה. כשעודד נותן זיכרון משיעור ישן: recap עם date של אותו שיעור (מ-missing_recaps) ועם topics/unclear/rating שאמר.
 - אם recap_question פעיל ועודד עונה עליו בטקסט: recap לאותו קורס ותאריך. kind=topics: מלא topics. kind=unclear: מלא unclear.
   kind=cause: מלא cause. אל תמלא שדה שלא נשאל עליו. אם הוא מבקש לדלג: {"action":"recap_skip","course":"...","date":"..."}.
 - מפת חומר: ב-material יש נושאי כל קורס עם מספר [id, שם]. כשעודד אומר מה נלמד או חזר (ב-recap, studied, topic_set), מלא topic_ids עם המספרים התואמים (רק אם ברור). אל תמציא נושאים.
