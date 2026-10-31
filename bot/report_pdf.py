@@ -73,8 +73,8 @@ def _cards(data: dict) -> str:
     return '<div class="cards">' + "".join(f'<div class="card"><div class="k">{k}</div><div class="v">{v}</div>{s}</div>' for k, v, s in cards) + "</div>"
 
 
-def build_html(data: dict) -> str:
-    css = f"""
+def _css() -> str:
+    return f"""
 @font-face {{ font-family: Heebo; src: url('file://{FONT}'); font-weight: 100 900; }}
 @page {{ size: A4; margin: 16mm 14mm 16mm 14mm; background: {BG}; @bottom-center {{ content: counter(page) " / " counter(pages); font: 9pt Heebo; color: #5B6270; direction: ltr; unicode-bidi: bidi-override; }} }}
 html {{ direction: rtl; font-family: Heebo, sans-serif; color: {TEXT}; background: {BG}; font-size: 11pt; line-height: 1.45; }}
@@ -103,6 +103,10 @@ ul {{ margin: 3pt 0; padding-right: 16pt; }} li {{ margin: 3pt 0; }}
 .prev {{ position: absolute; top: -3pt; width: 0; height: 20pt; border-right: 2px dashed #E5E7EB; }}
 .mv {{ width: 52pt; text-align: left; font-size: 9.5pt; color: {MUTED}; direction: ltr; }}
 """
+
+
+def build_html(data: dict) -> str:
+    css = _css()
     body = [f'<h1>{_e(data["title"])}</h1><div class="range">{_e(data.get("range", ""))}</div>',
             f'<div class="verdict">{_e(data.get("verdict", ""))}</div>', _cards(data)]
     body.append("<h2>לימוד לפי קורס</h2>" + minutes_chart(data["courses"]) +
@@ -123,6 +127,11 @@ ul {{ margin: 3pt 0; padding-right: 16pt; }} li {{ margin: 3pt 0; }}
             body.append(f'<div class="weak"><b>{_e(cn)}</b> · {_e(w["topic"])} · הבנה {w.get("rating", "?")}/5{why}</div>')
     else:
         body.append('<p class="muted">אין נושאים חלשים פתוחים. כל הכבוד.</p>')
+    if data.get("open_unclear"):
+        body.append("<h2>נקודות לא ברורות פתוחות</h2>")
+        for x in data["open_unclear"][:8]:
+            rt = f' · הבנה {x["rating"]}/5' if x.get("rating") is not None else ""
+            body.append(f'<div class="weak"><b>{_e(x["course"])}</b> · {_e(x["date"])}{rt}<div class="why">{_e(x["unclear"])}</div></div>')
     if data.get("gaps"):
         body.append("<p><b>פערים פתוחים:</b> " + _e(", ".join(data["gaps"])) + "</p>")
     body.append("<h2>השבוע הבא והמבחנים</h2>")
@@ -138,3 +147,49 @@ ul {{ margin: 3pt 0; padding-right: 16pt; }} li {{ margin: 3pt 0; }}
 def build_pdf(data: dict) -> bytes:
     from weasyprint import HTML      # ייבוא מאוחר: בלי WeasyPrint הבוט ממשיך לעבוד בטקסט
     return HTML(string=build_html(data), base_url=os.path.dirname(__file__)).write_pdf()
+
+
+def build_prep_html(data: dict) -> str:
+    """תזכורת לפני שיעור: כרטיס לכל קורס. data: title, range, entries (ראו bot/prep.py)."""
+    extra = """
+.pill { display: inline-block; border-radius: 9pt; padding: 1pt 9pt; font-weight: 700; font-size: 10pt; margin-left: 6pt; }
+.box { border: 1px solid %s; border-radius: 10pt; padding: 6pt 10pt; margin: 6pt 0; }
+.q { background: #101A2B; border-color: #1E3A66; color: #BFD6FF; }
+.u { background: #1A1215; border-color: #3A2226; }
+.lbl { font-size: 8.5pt; color: %s; display: block; margin-bottom: 1pt; }
+""" % (LINE, MUTED)
+    body = [f'<h1>{_e(data["title"])}</h1><div class="range">{_e(data.get("range", ""))}</div>']
+    for e in data["entries"]:
+        L = e.get("last")
+        body.append(f'<h2>{_e(e["name"])}</h2>')
+        if not L:
+            msg = {"missed": "בשיעור הקודם לא היית.", "no_recap": "אין ריקאפ מהשיעור הקודם. אפשר לכתוב לבוט \"ריקאפים\"."}.get(e.get("prev_status"), "עוד אין ריקאפ.")
+            body.append(f'<p class="muted">{msg}</p>')
+            if e.get("next"):
+                body.append(f'<p class="muted">לפי הסילבוס השבוע: {_e(e["next"])}</p>')
+            continue
+        r = L.get("rating")
+        col = GREEN if (r or 0) >= 4 else AMBER if (r or 0) == 3 else RED
+        pill = f'<span class="pill" style="background:{col}22;color:{col}">הבנה {r}/5</span>' if r is not None else ""
+        d = L["date"].split("-")
+        body.append(f'<div class="course"><div class="name"><span>שיעור קודם · {int(d[2])}.{int(d[1])}</span><span>{pill}</span></div>')
+        if L.get("topics"):
+            body.append(f'<div class="box"><span class="lbl">מה למדת</span>{_e(L["topics"])}</div>')
+        if L.get("unclear"):
+            cause = f'<div class="sub">הפריע: {_e(L["cause"])}</div>' if L.get("cause") else ""
+            body.append(f'<div class="box u"><span class="lbl">מה לא היה ברור</span>{_e(L["unclear"])}{cause}</div>')
+        if e.get("question"):
+            body.append(f'<div class="box q"><span class="lbl">שאלה לצ\'אט (אם עדיין לא ברור, שאל את המרצה)</span>{_e(e["question"])}</div>')
+        body.append("</div>")
+        if e.get("weak"):
+            body.append("<p><b>נושא חלש פתוח:</b> " + _e(", ".join(e["weak"])) + "</p>")
+        if e.get("due"):
+            body.append("<p><b>מתאים לחזרה:</b> " + _e(", ".join(e["due"])) + "</p>")
+        if e.get("next"):
+            body.append(f'<p class="muted">לפי הסילבוס השבוע: {_e(e["next"])}</p>')
+    return f'<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8"><style>{_css()}{extra}</style></head><body>{"".join(body)}</body></html>'
+
+
+def build_prep_pdf(data: dict) -> bytes:
+    from weasyprint import HTML
+    return HTML(string=build_prep_html(data), base_url=os.path.dirname(__file__)).write_pdf()

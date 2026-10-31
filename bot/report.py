@@ -29,11 +29,24 @@ class ReportMixin:
         exams = [{"name": COURSES[c]["name"], "date": f"{dt.day}.{dt.month}", "days": n} for c, dt, n in SEM.upcoming_exams(today)]
         gaps = sorted({COURSES[g["course"]]["name"] for g in SUG.open_gaps(self.st, today, uni, self.now)})
         tips = [f"{COURSES[x['course']]['name']}: " + ", ".join(x["why"]) for x in SUG.recommend(self.st, today, uni, self.now, limit=3)]
+        lo = (today - timedelta(days=21)).isoformat()
+        open_u = []
+        for r in sorted(self.st.get("recaps", []), key=lambda r: r.get("date", ""), reverse=True):
+            if r.get("date", "") < lo or r.get("course") not in COURSES or not (r.get("unclear") or "").strip():
+                continue
+            tids = [i for i in r.get("tids", []) if 0 <= i < len(TOP.ensure(self.st, r["course"]))]
+            tp = TOP.ensure(self.st, r["course"])
+            if tids and any(d >= r["date"] for i in tids for d in TOP.reviewed_real(tp[i])):
+                continue            # הנושא נסגר בחזרה אמיתית אחרי הריקאפ
+            if not tids and (r.get("rating") or 0) > 3:
+                continue
+            d = date.fromisoformat(r["date"])
+            open_u.append({"course": COURSES[r["course"]]["name"], "date": f"{d.day}.{d.month}", "rating": r.get("rating"), "unclear": r["unclear"].strip()[:140]})
         need = rep.get("recaps_needed") or 0
         return {"title": "סיכום שבוע", "range": f"{ws.day}.{ws.month} – {today.day}.{today.month}",
                 "verdict": headline.split(": ", 1)[-1], "total_min": sum(cur.values()), "prev_total_min": sum(prev.values()),
                 "recaps": (need - len(rep.get("missing_recaps", [])), need) if need else None, "courses": courses, "exams": exams,
-                "next_week": [x.lstrip("• ") for x in self.syllabus_lines(P.week_start(nxt))], "gaps": gaps, "tips": tips}
+                "next_week": [x.lstrip("• ") for x in self.syllabus_lines(P.week_start(nxt))], "gaps": gaps, "tips": tips, "open_unclear": open_u}
 
     def send_weekly_pdf(self, ws: date, today: date, uni, rep: dict, headline: str) -> bool:
         """True אם ה-PDF נשלח. כל כשל (WeasyPrint חסר, גופן, רשת) מחזיר False וקוראים לתצוגת הטקסט המלאה."""
